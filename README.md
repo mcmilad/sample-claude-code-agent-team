@@ -311,7 +311,7 @@ This configuration enables the following Claude Code plugins via `settings.json`
 | feature-dev | Guided feature development with architecture focus |
 | pr-review-toolkit | Comprehensive PR review with specialized agents |
 | commit-commands | Git commit, push, and PR creation (GitHub via the `gh` CLI) |
-| code-simplifier | Code clarity and maintainability refinement |
+| code-simplifier | Code clarity and maintainability refinement. Ships a **subagent**, not a skill — dispatch it with the `Agent` tool (`code-simplifier:code-simplifier`) |
 | frontend-design | Production-grade frontend interface design |
 | security-guidance | Security best practices — container hardening, secrets handling, and least-privilege guidance |
 | deploy-on-aws | AWS deployment — codebase analysis, service recommendation, cost estimation, IaC generation. Provides `awsiac` (CloudFormation/CDK validation), `awspricing` (cost reports), and an architecture-diagram skill |
@@ -320,13 +320,13 @@ This configuration enables the following Claude Code plugins via `settings.json`
 | databases-on-aws | Aurora DSQL — queries, schema inspection, migrations, and best-practice recommendations |
 | aws-core | Core AWS services — CDK/CloudFormation IaC, ECS/Fargate/ECR, IAM, CloudWatch/X-Ray observability, SQS/SNS/EventBridge/Kinesis, Amazon Bedrock, AWS SDK usage, Secrets Manager, cost/billing. Provides the `aws-mcp` proxy (`call_aws`, `run_script`, AWS docs) |
 | aws-agents | AI agents on AWS — scaffold, build, connect, deploy, harden, and optimize Amazon Bedrock AgentCore agents |
-| aws-data-analytics | Data lake & analytics — S3 Tables/Iceberg, Glue/Athena, ingestion, OpenSearch, and vector storage |
+| aws-data-analytics | Data lake & analytics — S3 Tables/Iceberg, Glue/Athena, ingestion, and vector storage. Seven skills: `connecting-to-data-source`, `creating-data-lake-table`, `exploring-data-catalog`, `finding-data-lake-assets`, `ingesting-into-data-lake`, `querying-data-lake`, `storing-and-querying-vectors` |
 
 ## Speed & Orchestration Modes
 
 Two on-demand Claude Code modes pair well with this agent-team setup. Both are optional and used per-task — not configured in this repo.
 
-- **`/fast`** — toggles faster Opus output without switching to a smaller model. Useful for interactive work (live debugging, tight edit-test loops) where latency matters more than token economy. Toggle it at session start rather than mid-conversation. It doesn't change an agent's model — that stays in each agent's `model` frontmatter.
+- **`/fast`** — toggles faster Opus output without switching to a smaller model (available on Opus 5/4.8/4.7). Useful for interactive work (live debugging, tight edit-test loops) where latency matters more than token economy. Toggle it at session start rather than mid-conversation. It doesn't change an agent's model — that stays in each agent's `model` frontmatter. **First-party Anthropic API only:** the CLI gates fast mode on backend identity, not model, so on an Amazon Bedrock, Google Vertex, or Microsoft Foundry route it refuses with *"Fast mode is only available when using the Anthropic API directly"* — the underlying beta (`speed: "fast"`) is not offered on those platforms, and no model choice works around it.
 - **Workflows / `ultracode`** — multi-agent orchestration that fans a task out across many subagents (parallel audits, large migrations, broad multi-file sweeps, adversarial review). Opt in by including the word **workflow** in a request, monitor progress with `/workflows`, or turn on **ultracode** for a standing workflow-per-task default. A heavier, broader-coverage complement to the lead → teammates → review loop; reach for it when a task genuinely needs the breadth, and stay with the standard team loop otherwise.
 
 ## Project-Local Settings (Optional)
@@ -367,7 +367,7 @@ JSON
 Notes:
 - **Scope to least privilege.** Each entry is a tool Claude Code may then run without asking. A bare name like `"Bash"` or `"Edit"` approves *every* use; prefer scoped forms — `"Bash(npm test:*)"`, `"WebFetch(domain:...)"` — for anything with side effects, and grant only what you're comfortable auto-approving.
 - Same shape as the repo's own [`.claude/settings.local.json`](.claude/settings.local.json), which ships with an empty `allow` list.
-- The file can also carry personal `env` or `model` overrides — e.g. `"model": "opus"`, or on Amazon Bedrock the inference-profile IDs (`"model": "us.anthropic.claude-opus-4-8"` plus `ANTHROPIC_DEFAULT_*_MODEL` entries in `env`). It need **not** restate `hooks`, `enabledPlugins`, or marketplaces from the shared config.
+- The file can also carry personal `env` or `model` overrides — e.g. `"model": "opus"`, or on Amazon Bedrock the inference-profile IDs (`"model": "us.anthropic.claude-opus-5"` plus `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` entries in `env`). Note that `ANTHROPIC_DEFAULT_MODEL` — without a tier — is **not** a recognized variable and is silently ignored; the main-loop override is `ANTHROPIC_MODEL`. It need **not** restate `hooks`, `enabledPlugins`, or marketplaces from the shared config.
 
 ## Customization
 
