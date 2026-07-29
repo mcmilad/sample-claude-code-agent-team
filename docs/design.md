@@ -18,7 +18,7 @@ User -> fullstack-agent (plan) -> [coding-agent, devops-agent] (build in paralle
 | coding-agent | Application code and tests | sonnet | Source code, test files |
 | devops-agent | Infrastructure, CI/CD, containers, docs | sonnet | IaC files, CI configs, READMEs |
 | review-agent | Code review and quality verification | opus | review.md only |
-| sa-agent | Well-Architected reviews (on-demand) | sonnet | sa-review.md |
+| sa-agent | Well-Architected reviews (on-demand) | opus | sa-review.md |
 
 ## Coordination Model
 

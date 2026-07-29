@@ -161,7 +161,7 @@ Multiple teammates of the same role MUST have unique names so they can each clai
 
 Teammates share one working tree (no per-agent worktrees by default). Conflict-freedom comes entirely from task decomposition: **no two tasks runnable in the same group may write the same file.** This is load-bearing — the no-overlap rule in Task Authoring is what makes shared-tree parallelism safe. Only fall back to `isolation: "worktree"` for a specific group you cannot decompose without file overlap (e.g. two tasks must both edit a generated lockfile); call this out in `tasks.md` for that group and merge after.
 
-Include spec path, role, key constraints, assigned task numbers, and needed tools in every spawn prompt. Teammates don't inherit your history. Model assignments come from agent frontmatter (Opus: review; Sonnet: coding, devops, sa).
+Include spec path, role, key constraints, assigned task numbers, and needed tools in every spawn prompt. Teammates don't inherit your history. Model assignments come from agent frontmatter (Opus: review, sa; Sonnet: coding, devops).
 
 ### Required Skills per Teammate (Include in Spawn Prompt)
 

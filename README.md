@@ -13,15 +13,15 @@ This repo provides a sample `.claude` configuration with four core agents that w
 | Agent | Role | Model | Effort |
 |-------|------|-------|--------|
 | **fullstack-agent** | Team lead — researches, designs specs, creates plans, delegates work | opus | xhigh |
-| **coding-agent** | Implements features and writes tests from specs | sonnet | xhigh |
-| **devops-agent** | Infrastructure, CI/CD, containers, and documentation | sonnet | high |
+| **coding-agent** | Implements features and writes tests from specs | sonnet | high |
+| **devops-agent** | Infrastructure, CI/CD, containers, and documentation | sonnet | xhigh |
 | **review-agent** | Reviews implementations for correctness, security, and quality | opus | max |
 
 Additional on-demand agents:
 
 | Agent | Role | Model | Effort |
 |-------|------|-------|--------|
-| **sa-agent** | AWS Solutions Architect — Well-Architected reviews, cost/security | sonnet | max |
+| **sa-agent** | AWS Solutions Architect — Well-Architected reviews, cost/security | opus | high |
 
 ## How It Works
 
