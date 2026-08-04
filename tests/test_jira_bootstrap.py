@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "scripts"))
@@ -18,7 +19,13 @@ A_CLOUD_ID = "a92ccd30-64c9-4992-a6a3-fb5cc92cbeb9"
 
 
 class FakeTransport:
-    """Records requests and replays queued responses keyed by 'METHOD path'."""
+    """Records requests and replays queued responses keyed by 'METHOD path'.
+
+    Matching is on the exact request path (query string ignored), not
+    substring containment -- a stub for ".../sprint" must not also answer a
+    request aimed at ".../sprint/42", and a stub for ".../search/jql" must
+    not answer a request aimed at the retired ".../search".
+    """
 
     def __init__(self, responses):
         self.responses = responses
@@ -26,9 +33,10 @@ class FakeTransport:
 
     def __call__(self, method, url, body, headers):
         self.calls.append((method, url, body))
+        path = urllib.parse.urlsplit(url).path
         for key, value in self.responses.items():
-            verb, fragment = key.split(" ", 1)
-            if method == verb and fragment in url:
+            verb, stub_path = key.split(" ", 1)
+            if method == verb and path == stub_path:
                 return value
         raise AssertionError("unstubbed request: {} {}".format(method, url))
 
@@ -87,7 +95,7 @@ def test_discover_ids_maps_fields_statuses_and_transitions():
                 {"id": "10002", "name": "Done"},
             ]},
         ],
-        "GET /rest/api/3/search": {"issues": [
+        "GET /rest/api/3/search/jql": {"issues": [
             {"key": "AGENT-1", "fields": {"status": {"name": "To Do"}}},
         ]},
         "GET /rest/api/3/issue/AGENT-1/transitions": {"transitions": [
@@ -107,6 +115,32 @@ def test_discover_ids_maps_fields_statuses_and_transitions():
     assert cfg["boardId"] == 1
 
 
+def test_discover_ids_probes_the_current_search_endpoint():
+    """/rest/api/3/search was removed by Atlassian (410 Gone in production);
+    the replacement is /rest/api/3/search/jql. Only the new path is stubbed
+    here, so a regression back to the retired path must fail as an
+    unstubbed request rather than silently succeed."""
+    a = admin({
+        "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
+        "GET /rest/api/3/project/AGENT/statuses": [
+            {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
+        "GET /rest/api/3/search/jql": {"issues": [
+            {"key": "AGENT-1", "fields": {"status": {"name": "To Do"}}},
+        ]},
+        "GET /rest/api/3/issue/AGENT-1/transitions": {"transitions": [
+            {"id": "11", "to": {"name": "To Do"}},
+        ]},
+        "GET /rest/agile/1.0/board": {"values": []},
+        "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
+    })
+    a.discover_ids("AGENT")
+    probe_requests = [
+        (m, urllib.parse.urlsplit(u).path) for m, u, _ in a.transport.calls if m == "GET"
+    ]
+    assert ("GET", "/rest/api/3/search/jql") in probe_requests
+    assert ("GET", "/rest/api/3/search") not in probe_requests
+
+
 def test_discover_ids_flags_a_project_with_no_to_do_status():
     """'To Do' is a required contract, not a discovered name. A board without it
     must fail loudly at setup rather than silently producing a mirror whose
@@ -118,7 +152,7 @@ def test_discover_ids_flags_a_project_with_no_to_do_status():
                 {"id": "10000", "name": "Backlog"},
                 {"id": "10002", "name": "Done"},
             ]}],
-        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/api/3/search/jql": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
         "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
@@ -131,7 +165,7 @@ def test_discover_ids_does_not_flag_a_project_that_has_to_do():
         "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
         "GET /rest/api/3/project/AGENT/statuses": [
             {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
-        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/api/3/search/jql": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
         "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
@@ -162,7 +196,7 @@ def test_discover_ids_reports_missing_in_review_status():
                 {"id": "10000", "name": "To Do"},
                 {"id": "10002", "name": "Done"},
             ]}],
-        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/api/3/search/jql": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
         "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
@@ -184,7 +218,7 @@ def test_discover_ids_unions_transitions_across_distinct_statuses():
                 {"id": "10001", "name": "In Progress"},
                 {"id": "10002", "name": "Done"},
             ]}],
-        "GET /rest/api/3/search": {"issues": [
+        "GET /rest/api/3/search/jql": {"issues": [
             {"key": "AGENT-1", "fields": {"status": {"name": "To Do"}}},
             {"key": "AGENT-2", "fields": {"status": {"name": "In Progress"}}},
         ]},
@@ -214,7 +248,7 @@ def test_discover_ids_reports_missing_gated_transitions_with_no_issues():
                 {"id": "10000", "name": "To Do"},
                 {"id": "10002", "name": "Done"},
             ]}],
-        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/api/3/search/jql": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
         "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
@@ -232,7 +266,7 @@ def test_discover_ids_reports_no_missing_gated_transitions_when_complete():
                 {"id": "10001", "name": "In Progress"},
                 {"id": "10002", "name": "Done"},
             ]}],
-        "GET /rest/api/3/search": {"issues": [
+        "GET /rest/api/3/search/jql": {"issues": [
             {"key": "AGENT-1", "fields": {"status": {"name": "In Progress"}}},
         ]},
         "GET /rest/api/3/issue/AGENT-1/transitions": {"transitions": [
@@ -253,7 +287,7 @@ def test_discover_ids_populates_cloud_id_from_tenant_info():
         "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
         "GET /rest/api/3/project/AGENT/statuses": [
             {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
-        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/api/3/search/jql": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": []},
         "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
@@ -268,7 +302,7 @@ def test_discover_ids_keeps_existing_cloud_id_when_tenant_info_is_empty():
         "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
         "GET /rest/api/3/project/AGENT/statuses": [
             {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
-        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/api/3/search/jql": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": []},
         "GET /_edge/tenant_info": {},
     })
@@ -285,7 +319,7 @@ def test_discover_ids_keeps_existing_cloud_id_when_tenant_info_is_a_truthy_non_d
         "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
         "GET /rest/api/3/project/AGENT/statuses": [
             {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
-        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/api/3/search/jql": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": []},
         "GET /_edge/tenant_info": ["unexpected"],
     })
@@ -301,7 +335,7 @@ def test_discover_ids_keeps_existing_cloud_id_when_tenant_info_lookup_fails():
         "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
         "GET /rest/api/3/project/AGENT/statuses": [
             {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
-        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/api/3/search/jql": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": []},
     })
 
@@ -356,7 +390,7 @@ def test_discover_ids_reports_an_empty_gate_set():
                 {"id": "10001", "name": "In Progress"},
                 {"id": "10002", "name": "Complete"},
             ]}],
-        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/api/3/search/jql": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
         "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
@@ -420,7 +454,7 @@ def test_discover_ids_reports_unresolved_field_aliases():
                 {"id": "10000", "name": "To Do"},
                 {"id": "10002", "name": "Done"},
             ]}],
-        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/api/3/search/jql": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
         "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
@@ -437,7 +471,7 @@ def test_discover_ids_reports_no_unresolved_fields_when_all_resolve():
         ],
         "GET /rest/api/3/project/AGENT/statuses": [
             {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
-        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/api/3/search/jql": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": []},
         "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })

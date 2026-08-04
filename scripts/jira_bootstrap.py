@@ -153,9 +153,16 @@ class JiraAdmin:
         # sampling a single issue therefore only ever covers one status's
         # outbound edges. Probe one representative issue per distinct status
         # (capped at one page) and union the resulting id -> target-name maps.
+        # /rest/api/3/search was removed by Atlassian (410 Gone in production
+        # as of this writing); /rest/api/3/search/jql is its replacement. It
+        # still returns an `issues` array, so the parsing below is unchanged.
+        # It paginates via `nextPageToken` rather than `startAt`, but nothing
+        # here ever used `startAt` -- a single page of up to 50 issues is the
+        # deliberate cap (see the docstring above), not partial results to
+        # page through.
         transitions = {}
         probe = self.request(
-            "GET", "/rest/api/3/search?jql=project%3D{}&maxResults=50&fields=status".format(
+            "GET", "/rest/api/3/search/jql?jql=project%3D{}&maxResults=50&fields=status".format(
                 project_key))
         representative_by_status = {}
         for issue in probe.get("issues", []):
