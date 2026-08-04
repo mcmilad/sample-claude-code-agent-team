@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/hooks/task_created_format_check.py\""
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/task_created_format_check.py\""
           }
         ]
       }
@@ -53,7 +53,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/hooks/task_completed_verify_gate.py\""
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/task_completed_verify_gate.py\""
           }
         ]
       }
@@ -63,7 +63,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/hooks/teammate_idle_workcheck.py\""
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/teammate_idle_workcheck.py\""
           }
         ]
       }
