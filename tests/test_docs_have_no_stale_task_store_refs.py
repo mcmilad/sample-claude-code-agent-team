@@ -18,6 +18,8 @@ DOCS = [
     # Loaded at every task close-out, so a stale row here is read in the same
     # session as "there is no tasks.md" from the jira-workflow skill.
     ".claude/skills/documentation/SKILL.md",
+    # Agent-facing: a slash command the lead runs during brainstorming.
+    "commands/brainstorm.md",
 ]
 
 STALE = re.compile(r"\bTaskCreate\b|\bTaskUpdate\b|\bTaskList\b|\bTaskGet\b|tasks\.md"
@@ -33,6 +35,7 @@ MIGRATED = [
     ".claude/agents/fullstack-agent.md",
     ".claude/skills/spec-workflow/SKILL.md",
     ".claude/skills/documentation/SKILL.md",
+    "commands/brainstorm.md",
 ]
 
 TEAMMATES = [

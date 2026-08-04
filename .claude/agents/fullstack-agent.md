@@ -149,12 +149,42 @@ token acts with the operator's **full Jira permissions** — far beyond the MCP'
 `read/write:jira-work` grant.
 
 **Never** pass it to a teammate, never echo it, never put it in an issue, a comment, a
-spec, or a spawn prompt. You are the only actor that runs the bootstrap script. If a
-teammate needs a sprint opened or closed, it messages you and you run it.
+spec, or a spawn prompt. You are the only *agent* that ever runs the bootstrap script —
+no teammate runs it, ever, under any circumstance.
 
-If the credential is absent, the script exits non-zero with instructions. Escalate to the
-user — do not fall back to a run without sprints, and do not ask a teammate to work
-around it.
+That does not mean you always hold the credential yourself. Two paths, per the README:
+
+- **Recommended (separate terminal)**: the operator exports `JIRA_API_TOKEN` only in a
+  terminal that never launched Claude Code, so it is never in your environment (every
+  `Bash` subprocess you run inherits *your* session's environment, not a sibling
+  terminal's). On this path you do not hold the credential at all — see "Sprint
+  lifecycle handshake" below.
+- **Convenience path (not recommended)**: the operator exported the token into the shell
+  that launched Claude Code, so it is present in your environment. On this path you run
+  the bootstrap script directly.
+
+Either way, if a teammate needs a sprint opened or closed, it messages *you* — never the
+operator directly — and you either run the command yourself or relay it per the
+handshake below. A teammate never runs bootstrap and never talks to the operator about it.
+
+If the credential is absent from your environment **and** the operator is unreachable (no
+handshake possible), escalate to the user — do not fall back to a run without sprints, and
+do not ask a teammate to work around it.
+
+### Sprint lifecycle handshake
+
+At each sprint-lifecycle step (`sprint-open`, `sprint-close`), check whether
+`JIRA_API_TOKEN` (and `JIRA_SITE`/`JIRA_EMAIL`) is present in your own environment first —
+this is not a guess, `scripts/jira_bootstrap.py` itself exits non-zero immediately via
+`_admin_from_env` if it's missing, before any network call:
+
+- **Credential present** (convenience path): run the command yourself, as below.
+- **Credential absent** (recommended path — the normal case): `SendMessage` the operator
+  the exact command to run in their separate terminal (e.g. `python3
+  scripts/jira_bootstrap.py sprint-open --name "Group 1 - interfaces"`), then wait for
+  their confirmation (the returned sprint id, or "closed") before proceeding to the next
+  step. This is a normal handshake on the recommended path, not an escalation and not a
+  blocker — do not mark it `[!]` or treat it as an impediment.
 
 ### One-time setup per repository
 
@@ -258,7 +288,7 @@ All non-trivial work follows the `spec-workflow` skill. All AWS infrastructure t
 You author and review. You do NOT claim issues. Teammates claim issues per the claim protocol in the `jira-workflow` skill.
 
 5. Spawn the **full worker pool** via the `Agent` tool (FIRST action — no exceptions), one spawn per instance (multiple named instances per role per the Team Composition pool table — e.g. `coding-1` … `coding-6`, `review-1` … `review-4`), each with `run_in_background: true`, its **instance identity**, the required-skills preamble, and the self-claim instruction. **Send these spawns in a single message (parallel tool calls)** so the pool comes up concurrently, not one at a time.
-6. Open the group's sprint: `python3 scripts/jira_bootstrap.py sprint-open --name "Group 1 - interfaces"`. Record the returned id in `.claude/specs/<slug>/jira-run.json`.
+6. Open the group's sprint per the **Sprint lifecycle handshake** (above): `python3 scripts/jira_bootstrap.py sprint-open --name "Group 1 - interfaces"` — run it yourself if the credential is in your environment, otherwise message the operator the exact command and wait for the returned sprint id. Record that id in `.claude/specs/<slug>/jira-run.json`.
 7. Create the Epic (once per spec), then **every issue in the group up front** — full description with `Spec:`/`Files:`/`Acceptance:`/`Run:`, `role-*` + `spec-*` + `group-*` labels, parent set to the Epic, sprint field set to the group's sprint id, and `blocks`/`is blocked by` links for real dependencies. A deep ready-queue lets all instances self-claim and load-balance immediately. Do not drip issues one by one.
 8. `SendMessage` the pool with the spec path, the sprint name, key context, and interface contracts. Tell instances to self-claim from the queue per the `jira-workflow` claim protocol rather than assigning issues.
 9. Monitor with JQL, not memory: `project = AGENT AND sprint in openSprints() ORDER BY status`. Respond to impediment flags promptly. Watch for idle instances while `To Do` issues remain — that means a dependency or too-coarse issue; split or unblock it. **Before you go idle yourself, advance the graph:** after any issue reaches `In Review`, dispatch whatever you own next (notably spawning the reviewer once there is something to review) — do not stop with unblocked work sitting unclaimed. A past incident wedged an entire run because the lead idled with unblocked work sitting unclaimed.
@@ -266,7 +296,7 @@ You author and review. You do NOT claim issues. Teammates claim issues per the c
 11. Teammates run their own verification — do not run it for them; read their comments
 11a. Security scans (static analysis, dependency scan, IaC scan) are delegated to teammates per the **Security scan remediation priority** section in the `spec-workflow` skill. Scan artifacts saved under `.claude/specs/<slug>/`. Any accepted risk with compensating controls is logged in `.claude/specs/<slug>/security-exceptions.md` (you may write this file as a decision-log entry).
 12. **Pipelined parallel review** — designate `review-1` as the **synthesizer** and `review-2`..`review-4` as **analysts**, one per reviewable slice (module/files). State each reviewer's role in its handoff `SendMessage`, and for analysts name the synthesizer to report to. Analysts review their slice *as it lands* (pipelined, concurrent with in-flight build issues) and message structured findings to the synthesizer — they close nothing. The synthesizer reviews its own slice plus whole-group cross-module consistency, merges all analyst findings, posts the single verdict as a comment on the sprint's `role-review` issue, and — only on PASS — transitions the group's issues to `Done`. Each handoff includes spec path, cycle number, the specific modified files for that slice, and acceptance criteria
-13. Wait for the **synthesizer's single verdict** before advancing past the group — there is exactly one verdict comment per cycle, so no verdict aggregation on your side. Then close the sprint: `python3 scripts/jira_bootstrap.py sprint-close --id <id>`, and open the next. Do NOT post a verdict yourself, and confirm the analysts did not either (see Review Gate Authority below)
+13. Wait for the **synthesizer's single verdict** before advancing past the group — there is exactly one verdict comment per cycle, so no verdict aggregation on your side. Then close the sprint per the **Sprint lifecycle handshake** (above): `python3 scripts/jira_bootstrap.py sprint-close --id <id>` — run it yourself if the credential is in your environment, otherwise message the operator the exact command and wait for their confirmation — and open the next. Do NOT post a verdict yourself, and confirm the analysts did not either (see Review Gate Authority below)
 13a. **Live-validation gate for IaC / deploy / shell tooling.** Static review (`terraform validate`, `cfn-lint`, `shellcheck`, `checkov`, `helm lint`, `bash -n`) is necessary but **not sufficient** — it cannot catch runtime/cloud-semantics bugs. Past runs shipped 5+ latent `deploy.sh` bugs, a wrong-region config clobber, an SSE-S3-not-KMS state backend, a missing `--region`, and a wrong-kubeconfig-context false-positive smoke PASS — every one invisible to static gates and caught only by actually running the path. For any group that changes a deploy script, IaC, or CI: a real `deploy → smoke → teardown` (or the closest executable equivalent for the environment) is a **required** gate before the group is "done", not an optional extra. If it genuinely cannot run here (no Docker, no cloud creds), say so explicitly, mark the affected acceptance criteria author-and-static-validate-only, and escalate that the live gate is outstanding — do NOT record a PASS that implies it ran.
 
 ### Phase 3: Fix (if FAIL)

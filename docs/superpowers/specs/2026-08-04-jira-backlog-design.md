@@ -195,7 +195,7 @@ affects only the idle nudge, which is advisory and fail-open.
 
 **New**
 - `.claude/skills/jira-workflow/SKILL.md` — JQL snippets, claim protocol, comment templates, field discovery, tie-break rule. Mechanics live here so agent files stay readable
-- `scripts/jira_bootstrap.py` — `ensure-project`, `ensure-status`, `sprint-open`, `sprint-close`; idempotent, non-interactive
+- `scripts/jira_bootstrap.py` — `ensure-project`, `discover`, `sprint-open`, `sprint-close`; idempotent, non-interactive (no `ensure-status`: the Jira API cannot reliably add a status to a team-managed project, so that subcommand was never built — see "The admin plane cannot add the `In Review` status" above)
 - `.claude/hooks/jira_issue_format_check.py`, `jira_transition_verify_gate.py`, `jira_mirror_journal.py`
 
 **Deleted**

@@ -95,9 +95,9 @@ This document provides a security overview of the Claude Code Multi-Agent Develo
 ### Monitoring and Logging
 
 - All agent interactions occur within the Claude Code session and are visible to the user
-- Task coordination (`TaskCreate`/`TaskUpdate`/`TaskList`) provides an audit trail of agent actions
+- Backlog coordination is Jira (issues, transitions, comments); the audit trail is `~/.claude/logs/team-hooks.jsonl` (every enforcement hook decision) plus the Jira issue history itself
 - `decisions.md` logs mid-flight architectural decisions
-- `review.md` documents review findings per cycle
+- Review verdicts are posted as comments on the sprint's `role-review` issue in Jira, one per review cycle
 
 ### Incident Response
 
