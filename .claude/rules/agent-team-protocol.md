@@ -91,8 +91,8 @@ invisible to the idle check until an agent next touches it.
 - **Missing details**: Check `spec.md` and `design.md` first. If not there, `SendMessage` to lead or relevant teammate
 - **Multiple valid approaches**: Pick the simplest that satisfies acceptance criteria
 - **Out-of-scope issues**: Note in completion report; don't fix
-- **Conflicting requirements**: Mark `[!]`, never silently pick one interpretation
-- **Dependency on another teammate**: `SendMessage` to them directly, then `[!]` if not ready
+- **Conflicting requirements**: Flag the issue as an impediment (see Blocker Reporting), never silently pick one interpretation
+- **Dependency on another teammate**: `SendMessage` to them directly, then flag the issue as an impediment if not ready
 
 ## Coordination Under Unreliable Signals (Learned — All Teammates)
 
@@ -104,8 +104,8 @@ Message delivery, idle pings, and the Jira/Atlassian MCP are all **laggy and occ
   Before acting on ANY status claim (yours or a peer's), confirm it against Jira. If
   Jira is unreachable, stall and escalate; do not invent state.
 - **Delivery lag ≠ death.** Messages routinely arrive delayed, batched, and out of order. "No message in N minutes" or "no OS process visible" is **not** evidence a teammate is stalled or dead — it is evidence the channel is quiet. Teammates running long verification passes (a multi-minute plugin review, an uncached test suite, a `terraform plan`) look identical to a dead one over the wire. Do not conclude a peer has failed from silence alone.
-- **Ignore stale replays silently.** If you receive a stale assignment (or re-assignment) message for an issue that is already `Done`/sentinel-consumed, or for a key that `getJiraIssue` reports as "not found", treat it as a stale roll-forward artifact: take no action and do **not** re-run verification or re-report. Reply at most once if a peer needs confirmation. Re-verifying completed work on every replay is a documented time sink that starves the pool.
-- **Claim atomically, one owner per issue.** Before working an issue, set yourself as owner and confirm no peer already owns it via a single authoritative `getJiraIssue`. If two instances race, the later one backs off to a different issue. Never edit a file outside your claimed issue's declared paths — peers run concurrently and will clobber.
+- **Ignore stale replays silently.** If you receive a stale assignment (or re-assignment) message for an issue that is already `Done`, or for which a verification sentinel is already present on disk (proof that verification ran, even before the transition lands and consumes it), or for a key that `getJiraIssue` reports as "not found", treat it as a stale roll-forward artifact: take no action and do **not** re-run verification or re-report. Reply at most once if a peer needs confirmation. Re-verifying completed work on every replay is a documented time sink that starves the pool.
+- **Claim atomically, one owner per issue.** Before working an issue, set yourself as owner and confirm no peer already owns it via a single authoritative `getJiraIssue`. If two instances race, the lowest instance name wins lexicographically — the loser removes its own `agent-*` label and returns to claiming a different issue. Never edit a file outside your claimed issue's declared paths — peers run concurrently and will clobber.
 - **Globally-unique instance names.** With multiple specs/teams possibly active, a bare role name (e.g. `review-2`) can misroute to a same-named instance on a different spec. Use the names the lead assigned and address peers by their exact instance name.
 
 ## Shutdown (Implicit Team — Auto-Cleanup)
