@@ -87,3 +87,24 @@ def test_load_state_skips_corrupt_lines(tmp_path, monkeypatch):
 def test_load_state_returns_empty_when_no_journal(tmp_path, monkeypatch):
     monkeypatch.setattr(jira_mirror, "MIRROR_DIR", str(tmp_path))
     assert jira_mirror.load_state("NOPE") == {}
+
+
+def test_agent_label_handles_non_iterable_input():
+    """Regression: agent_label must not raise on truthy non-iterables."""
+    assert jira_mirror.agent_label(42) is None
+    assert jira_mirror.agent_label(True) is None
+    assert jira_mirror.agent_label({"key": "value"}) is None
+
+
+def test_load_state_skips_valid_json_non_object_lines(tmp_path, monkeypatch):
+    """Regression: load_state must skip valid JSON that isn't an object."""
+    monkeypatch.setattr(jira_mirror, "MIRROR_DIR", str(tmp_path))
+    jira_mirror.append_event("AGENT", {"op": "create", "key": "AGENT-1", "status": "To Do"})
+    # Append valid JSON that isn't a dict
+    with open(jira_mirror.mirror_path("AGENT"), "a") as fh:
+        fh.write("42\n")  # valid JSON, not an object
+        fh.write("null\n")  # valid JSON, not an object
+        fh.write("[1, 2, 3]\n")  # valid JSON, not an object
+    jira_mirror.append_event("AGENT", {"op": "create", "key": "AGENT-2", "status": "To Do"})
+    state = jira_mirror.load_state("AGENT")
+    assert set(state) == {"AGENT-1", "AGENT-2"}, "should skip non-object JSON lines"

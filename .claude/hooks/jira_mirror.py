@@ -80,6 +80,8 @@ def load_state(project_key):
             continue
         try:
             event = json.loads(line)
+            if not isinstance(event, dict):
+                continue
         except Exception:
             continue
         key = event.get("key")
@@ -103,7 +105,10 @@ def issue_project(issue_key):
 
 def agent_label(labels):
     """The first agent-* label in the list, or None if unclaimed."""
-    for label in labels or []:
-        if str(label).startswith("agent-"):
-            return label
+    try:
+        for label in labels or []:
+            if str(label).startswith("agent-"):
+                return label
+    except Exception:
+        pass
     return None
