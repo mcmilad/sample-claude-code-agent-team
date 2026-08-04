@@ -116,10 +116,14 @@ When documenting within the spec-driven workflow, these artifacts have defined f
 |----------|-------|---------|
 | `spec.md` | fullstack-agent | Design decisions, constraints, alternatives considered |
 | `design.md` | fullstack-agent | Architecture, repo structure, infrastructure design |
-| `tasks.md` | fullstack-agent (authored), all teammates (updated) | Parallelized task groups with completion notes |
-| `review.md` | review-agent | Severity-rated findings with PASS/FAIL verdict |
+| `jira-run.json` | fullstack-agent | Generated: Epic key + sprint id per parallel group |
 | `sa-review.md` | sa-agent | Well-Architected findings by pillar, cost estimates |
 | `decisions.md` | any agent via fullstack-agent | Mid-flight decisions to prevent re-litigation |
+
+The backlog itself is **not** a document: issues, sprints, completion notes and review
+verdicts all live in Jira (see the `jira-workflow` skill). Review findings are comments on
+the issue they concern; the group verdict is a comment on the sprint's `role-review` issue.
+There is no backlog file and no review file to write.
 
 When writing documentation for a project that uses the spec workflow, link to relevant specs rather than duplicating their content.
 
@@ -128,7 +132,7 @@ When writing documentation for a project that uses the spec workflow, link to re
 - `devops-agent` owns READMEs, runbooks, and architecture docs — keeps them next to the code they describe
 - `coding-agent` writes inline documentation (function/class/module docs) during implementation
 - Both agents delegate to `pr-review-toolkit:comment-analyzer` after writing docs to verify accuracy
-- `sa-agent` produces architecture review documentation in Well-Architected pillar format, claims and tracks tasks like other teammates
+- `sa-agent` produces architecture review documentation in Well-Architected pillar format, claims and tracks Jira issues like other teammates
 - Use the `gh` CLI (`gh issue create`) to create issues for documentation that needs future updates (e.g., after API changes)
 
 ## Writing Tips

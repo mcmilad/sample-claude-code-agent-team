@@ -44,6 +44,7 @@ Specs live at `.claude/specs/<slug>/` (short kebab-case slug, e.g. `auth-api`):
   design.md        # architecture, repo structure (MUST include Security Considerations)
   jira-run.json    # generated: Epic key + sprint id per group
   decisions.md     # mid-flight decision log
+  sa-review.md     # Well-Architected findings, written by sa-agent when it runs
   requirements.md  # from /brainstorm (optional)
   prd/             # product requirements docs (optional)
 ```
@@ -68,7 +69,7 @@ speed**, so decompose aggressively toward many small independent issues:
 - Infrastructure issues creating stateful resources MUST follow
   `rules/AWS-security-guidelines.md`.
 
-Reference templates for `spec.md` / `design.md` / `decisions.md` / `prd.md` live in
+Reference templates for `spec.md` / `design.md` / `sa-review.md` / `decisions.md` / `prd.md` live in
 `docs/specs/templates/` — copy them into `.claude/specs/<slug>/` as starting points, not
 rigid constraints. `design.md` MUST keep its Security Considerations section.
 

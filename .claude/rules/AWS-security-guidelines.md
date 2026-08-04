@@ -18,7 +18,7 @@ Implement data security controls in phased priority order:
 **Phase 3** (production requirement):
 6. Versioning: `aws s3api put-bucket-versioning --bucket <name> --versioning-configuration Status=Enabled`, verify with `aws s3api get-bucket-versioning` (expect: Status=Enabled for data-classification=confidential|internal)
 7. MFA Delete: `aws s3api put-bucket-versioning --bucket <name> --versioning-configuration Status=Enabled,MFADelete=Enabled --mfa "<device-arn> <code>"`, verify with `aws s3api get-bucket-versioning` (expect: MFADelete=Enabled for data-classification=confidential)
-8. BYOK documentation: Create `.claude/specs/<slug>/kms-key-usage.md` documenting key ARNs, rotation schedule, and access policies, flag for security review in `review.md`
+8. BYOK documentation: Create `.claude/specs/<slug>/kms-key-usage.md` documenting key ARNs, rotation schedule, and access policies, flag for security review in the reviewer's verdict comment
 
 ## Data Security Verification Checklist
 

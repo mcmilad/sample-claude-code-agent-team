@@ -17,6 +17,7 @@ Create a spec before any non-trivial work — if it touches multiple files, invo
   design.md        # Architecture, repo structure, infrastructure design
   jira-run.json    # Generated: Epic key + sprint id per group
   decisions.md     # Mid-flight decision log
+  sa-review.md     # Well-Architected findings (only when sa-agent runs)
   requirements.md  # From /brainstorm (optional)
   prd/             # Product requirements docs (optional)
 ```

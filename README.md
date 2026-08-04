@@ -61,16 +61,22 @@ The agent team tracks all work in Jira. Two credentials, split by privilege:
 ```
 This grants `read:jira-work` and `write:jira-work`, which is everything the agents need. Because the grant is scoped that narrowly, it cannot create the project, add a workflow status, or run the sprint lifecycle — that needs a second, more privileged credential.
 
-**Admin** — create a Jira API token at *id.atlassian.com > Security > API tokens*, then:
+**Admin** — create a Jira API token at *id.atlassian.com > Security > API tokens*, then, **in a separate terminal from the one you launch Claude Code in**:
 ```bash
 export JIRA_SITE=your-site.atlassian.net
 export JIRA_EMAIL=you@example.com
 export JIRA_API_TOKEN=...
 ```
 
-This token acts with your full Jira permissions and is used only by `scripts/jira_bootstrap.py` — run it yourself (or as the `fullstack-agent` lead); agents never receive it. `discover` writes the per-site field, status, and transition IDs to `.claude/jira-config.json` (gitignored) so nothing is hardcoded and the same repo works on any site.
+The separate terminal is the point, not a formality. This token acts with your **full Jira permissions** — far beyond the MCP's `read/write:jira-work`. Every `Bash` command an agent runs is a child of the process you started Claude Code with and inherits its environment, so a token exported into that shell is readable by any agent in the session (`env`, `printenv`, any subprocess). Exporting it only in a separate shell means it is never in the agent session's environment at all, which is the one mechanism here that actually confines it.
 
-Run bootstrap in this order — three steps, not two. The transition-discovery step samples *existing* issues' available transitions, so it is necessarily empty on a brand-new project:
+Keeping the token out of agent hands otherwise rests on **instructions, not enforcement**: `fullstack-agent` is told never to pass it on, never to echo it, and to be the only actor that runs the bootstrap script. Nothing in the hooks or the harness checks that. If you do export it into the Claude Code shell (or run bootstrap through the lead), treat the token as exposed to the whole session and scope it accordingly.
+
+The same applies mid-run: the sprint lifecycle (`sprint-open` / `sprint-close`) needs the admin token too. On the recommended path the lead messages you at each group boundary and **you** run the command in the separate terminal. Letting the lead run it instead is the convenience path, and it costs you the confinement — the token has to be in the session's environment for that to work.
+
+`scripts/jira_bootstrap.py` is the only thing that uses it. `discover` writes the per-site field, status, and transition IDs to `.claude/jira-config.json` (gitignored) so nothing is hardcoded and the same repo works on any site — that config holds no credential, so the agents read it freely.
+
+Run bootstrap **in that same separate terminal**, in this order — three steps, not two. The transition-discovery step samples *existing* issues' available transitions, so it is necessarily empty on a brand-new project. Step 2 happens in the Claude Code session; steps 1 and 3 are yours:
 
 ```bash
 # 1. Create the project. On a fresh project this exits 4 (see below) -- expected, not

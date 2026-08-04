@@ -15,6 +15,9 @@ DOCS = [
     ".claude/agents/sa-agent.md",
     ".claude/agents/fullstack-agent.md",
     ".claude/skills/spec-workflow/SKILL.md",
+    # Loaded at every task close-out, so a stale row here is read in the same
+    # session as "there is no tasks.md" from the jira-workflow skill.
+    ".claude/skills/documentation/SKILL.md",
 ]
 
 STALE = re.compile(r"\bTaskCreate\b|\bTaskUpdate\b|\bTaskList\b|\bTaskGet\b|tasks\.md"
@@ -29,6 +32,7 @@ MIGRATED = [
     ".claude/agents/sa-agent.md",
     ".claude/agents/fullstack-agent.md",
     ".claude/skills/spec-workflow/SKILL.md",
+    ".claude/skills/documentation/SKILL.md",
 ]
 
 TEAMMATES = [
@@ -59,6 +63,20 @@ def test_every_teammate_requires_the_jira_workflow_skill():
         with open(os.path.join(REPO, rel)) as fh:
             assert "jira-workflow" in fh.read(), \
                 "{} must load jira-workflow before claiming work".format(rel)
+
+
+def test_spec_directory_blocks_list_every_artifact_an_agent_writes():
+    """sa-agent writes .claude/specs/<slug>/sa-review.md, so both documents
+    that show the spec directory must list it -- otherwise the lead reads a
+    structure that has no room for a file a teammate is told to create."""
+    assert "sa-review.md" in open(
+        os.path.join(REPO, ".claude", "agents", "sa-agent.md")).read()
+    for rel in (".claude/skills/spec-workflow/SKILL.md",
+                ".claude/agents/fullstack-agent.md"):
+        with open(os.path.join(REPO, rel)) as fh:
+            block = re.search(r"\.claude/specs/<slug>/\n(.*?)```", fh.read(), re.S)
+        assert block and "sa-review.md" in block.group(1), \
+            "{} omits sa-review.md from the spec directory structure".format(rel)
 
 
 def test_lead_documents_the_bootstrap_and_sprint_lifecycle():

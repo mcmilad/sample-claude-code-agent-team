@@ -6,15 +6,22 @@ cannot create a project, add a workflow status, or run the sprint lifecycle.
 This script does those things with a Jira API token, and discovers the per-site
 IDs everything else reads from .claude/jira-config.json.
 
-SECURITY: the API token acts with the operator's full Jira permissions. It is
-deliberately confined to this one scripted surface. Teammates never hold it and
-never invoke this script -- the team lead does, at group boundaries.
+SECURITY: the API token acts with the operator's full Jira permissions -- far
+beyond the MCP's read/write:jira-work. This script is the only surface that
+uses it, and agents are *instructed* not to hold or echo it. That instruction
+is not a mechanism: a token exported into the shell that launches Claude Code
+is inherited by every agent Bash subprocess and readable by any teammate.
+
+The one real confinement is where you export it. Run these commands in a
+terminal SEPARATE from the one running Claude Code, so the token is never in
+the agent session's environment at all. If you run them from inside the session
+(or via the team lead), treat the token as exposed to every agent in it.
 
 Non-interactive by contract (see .claude/rules/execution-hygiene.md): every
 input arrives via argument or environment variable, nothing reads stdin, and a
 missing input exits non-zero rather than prompting.
 
-Usage:
+Usage (in a separate terminal, not the Claude Code session's shell):
     export JIRA_SITE=your-site.atlassian.net
     export JIRA_EMAIL=you@example.com
     export JIRA_API_TOKEN=...            # id.atlassian.com > Security > API tokens

@@ -59,14 +59,25 @@ site would silently break every other install.
 ### Credential split
 
 Two planes, separated by privilege. The admin credential is powerful (it acts with the operator's
-full Jira permissions), so it is confined to one scripted, auditable surface.
+full Jira permissions), so its use is narrowed to one scripted, auditable surface.
 
 | Plane | Credential | Holder | Operations |
 |---|---|---|---|
-| Admin | `JIRA_API_TOKEN`, `JIRA_EMAIL`, `JIRA_SITE` | `scripts/jira_bootstrap.py` only | Create project, add `In Review` status, create/start/close sprints |
+| Admin | `JIRA_API_TOKEN`, `JIRA_EMAIL`, `JIRA_SITE` | `scripts/jira_bootstrap.py` only | Create project, discover per-site IDs, create/start/close sprints |
 | Runtime | MCP OAuth | Every agent | Issues, transitions, comments, labels, links, rank |
 
-Teammates are never given the admin credential and never invoke the bootstrap script.
+The admin plane cannot add the `In Review` status. The Jira API does not reliably create statuses
+on a team-managed project, so `jira_bootstrap.py` only *warns* and prints a one-time board edit for
+the operator to make by hand; `discover` then picks the new status up.
+
+**Confinement is a convention plus an instruction, not a mechanism.** Teammates are *told* never to
+hold the admin credential and never to invoke the bootstrap script, and the lead is *told* it is the
+only actor that runs it — nothing enforces either. Every agent `Bash` call is a child of the process
+that launched Claude Code and inherits its environment, so a token exported into that shell is
+readable by any teammate. The one real control available is where the operator exports it: running
+the bootstrap commands in a separate terminal keeps the token out of the agent session's environment
+entirely. That is the documented, recommended path; anything else trades the confinement for
+convenience.
 
 ### Jira schema
 
