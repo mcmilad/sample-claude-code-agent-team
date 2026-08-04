@@ -122,7 +122,7 @@ Before marking ANY task complete, invoke the `documentation` skill via the `Skil
 - Config docs — env vars, parameter store keys, feature flags, deploy parameters
 - Changelogs / release notes when the project tracks them
 
-Required detail level: purpose, inputs/outputs (resource names, ARNs, endpoints, env vars), prerequisites, deploy/teardown commands, common failure modes, and links to related specs/ADRs. After updating docs, you may still delegate to `pr-review-toolkit:comment-analyzer` for an accuracy pass. The team lead handles the top-level project README in Phase 4 — do not duplicate that here. If the `documentation` skill is unavailable, mark the task `[!]` and notify the lead — do not silently skip.
+Required detail level: purpose, inputs/outputs (resource names, ARNs, endpoints, env vars), prerequisites, deploy/teardown commands, common failure modes, and links to related specs/ADRs. After updating docs, you may still delegate to `pr-review-toolkit:comment-analyzer` for an accuracy pass. The team lead handles the top-level project README in Phase 4 — do not duplicate that here. If the `documentation` skill is unavailable, flag the issue as an impediment and notify the lead — do not silently skip.
 
 ## AWS Plugins
 
