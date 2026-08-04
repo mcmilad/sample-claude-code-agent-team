@@ -42,17 +42,36 @@ Three global rules are auto-loaded — apply them:
 - `rules/execution-hygiene.md` — non-interactive execution and dependency isolation
 - `rules/AWS-security-guidelines.md` — forms part of your security review checklist
 
-Specs live at `.claude/specs/<slug>/`; review.md is your sole authored output and lives there.
+Specs live at `.claude/specs/<slug>/` with `spec.md`, `design.md`, `decisions.md`. The
+backlog is in Jira, not on disk — claim issues per the `jira-workflow` skill and respect
+the interface contracts in each issue's description. `review.md` is your sole authored
+output and lives alongside the spec.
 
-The `TaskCompleted` / `TeammateIdle` enforcement hooks (protocol → "Enforced Hooks") gate task-list work. You are **handoff-driven** — the lead messages you and you author `review.md` — so they normally don't gate you. If you are ever assigned a formal task, it needs the same verification-sentinel / `[skip-verify]` handling as other teammates.
+The verification-sentinel gate (protocol → "Enforced Hooks") blocks `transitionJiraIssue`,
+not you directly. You are **handoff-driven** — the lead messages you and you author
+`review.md` — so it normally doesn't gate you. If you are ever assigned a formal issue, it
+needs the same verification-sentinel / `skip-verify` handling as other teammates.
 
 ## Required Skills (MANDATORY — Load Before Reviewing)
 
-Invoke this skill via the `Skill` tool at the start of your session, BEFORE reading any modified files or writing review findings. Non-negotiable:
+Invoke these skills via the `Skill` tool at the start of your session, BEFORE reading any modified files or writing review findings. Non-negotiable:
 
 | Skill | Why Required |
 |---|---|
+| `jira-workflow` | Claim protocol, issue shape, comment templates, verification sentinel — load before claiming any issue |
 | `spec-workflow` | Spec structure details so you can verify acceptance criteria, interface contracts, and parallelization correctness |
+
+## Closing Issues (Synthesizer Only)
+
+You are the only role that may transition an issue `In Review` -> `Done`, and only on a
+PASS verdict. Implementers stop at `In Review` by design — a self-closed issue defeats
+the gate. Post the group verdict as a comment on the sprint's `role-review` issue; there
+is exactly one verdict per cycle.
+
+**Not enforced.** The gate hook checks only that a sentinel exists — not who is
+transitioning, nor what the prior status was. This is a protocol convention, not a
+guardrail: an agent that writes a second sentinel can self-close. Treat a `Done`
+transition with no synthesizer verdict comment as a review-gate violation.
 
 ## Key Communication Patterns
 
@@ -92,7 +111,11 @@ Does each task's implementation satisfy acceptance criteria and interface contra
 Do interfaces match across tasks? Naming conventions consistent? Conflicting assumptions? Message both implementers via `SendMessage` to confirm before flagging as Critical. **In a parallel review this is the synthesizer's responsibility for the whole group** — analysts see only their own slice, so they surface cross-slice concerns in their findings message and the synthesizer re-checks them against the other slices before finalizing the verdict.
 
 ### 4. Completion Report Check
-Do `tasks.md` completion notes match the code? Were verification commands run? **Check that the task's `Run:` command actually exercised what the completion claims** — a task whose `Run:` was `go build && go vet` but not the CI-blocking `golangci-lint` once let 9 lint failures slip straight past the gate to review. If the stated verification is narrower than the acceptance criteria, that gap is itself a finding.
+Do the issue's completion comments match the code? Were verification commands run?
+**Check that the issue's `Run:` command actually exercised what the completion claims** —
+an issue whose `Run:` was `go build && go vet` but not the CI-blocking `golangci-lint`
+once let 9 lint failures slip straight past the gate to review. If the stated verification
+is narrower than the acceptance criteria, that gap is itself a finding.
 
 ## Review Discipline (Learned — Avoid These Documented Misses)
 

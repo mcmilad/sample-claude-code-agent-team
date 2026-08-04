@@ -21,7 +21,20 @@ STALE = re.compile(r"\bTaskCreate\b|\bTaskUpdate\b|\bTaskList\b|\bTaskGet\b|task
                    r"|TaskCreated|TaskCompleted")
 
 # Rewritten one task at a time; each task adds its file here.
-MIGRATED = [".claude/rules/agent-team-protocol.md"]
+MIGRATED = [
+    ".claude/rules/agent-team-protocol.md",
+    ".claude/agents/coding-agent.md",
+    ".claude/agents/devops-agent.md",
+    ".claude/agents/review-agent.md",
+    ".claude/agents/sa-agent.md",
+]
+
+TEAMMATES = [
+    ".claude/agents/coding-agent.md",
+    ".claude/agents/devops-agent.md",
+    ".claude/agents/review-agent.md",
+    ".claude/agents/sa-agent.md",
+]
 
 
 def test_migrated_docs_have_no_task_store_references():
@@ -37,3 +50,10 @@ def test_migrated_docs_have_no_task_store_references():
 
 def test_every_doc_is_eventually_migrated():
     assert set(MIGRATED) <= set(DOCS)
+
+
+def test_every_teammate_requires_the_jira_workflow_skill():
+    for rel in TEAMMATES:
+        with open(os.path.join(REPO, rel)) as fh:
+            assert "jira-workflow" in fh.read(), \
+                "{} must load jira-workflow before claiming work".format(rel)
