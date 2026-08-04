@@ -1,6 +1,6 @@
 """Shared helpers for the agent-team enforcement hooks.
 
-Imported by task_created_format_check.py, task_completed_verify_gate.py and
+Imported by jira_issue_format_check.py, jira_transition_verify_gate.py and
 teammate_idle_workcheck.py. Responsibilities:
   - parse the stdin JSON payload the harness delivers to a hook,
   - append an audit record to ~/.claude/logs/team-hooks.jsonl for every decision,
@@ -17,12 +17,27 @@ import re
 import sys
 from datetime import datetime, timezone
 
-HOME = os.path.expanduser("~")
-LOG_DIR = os.path.join(HOME, ".claude", "logs")
-LOG_PATH = os.path.join(LOG_DIR, "team-hooks.jsonl")
-TASKS_DIR = os.path.join(HOME, ".claude", "tasks")     # ~/.claude/tasks/<team>/<id>.json
-VERIFIED_DIR = os.path.join(LOG_DIR, "verified")        # completion sentinels
-NUDGE_DIR = os.path.join(LOG_DIR, "idle-nudges")        # idle loop-guard state
+
+def _home():
+    return os.path.expanduser("~")
+
+
+def log_dir():
+    return os.path.join(_home(), ".claude", "logs")
+
+
+def log_path():
+    return os.path.join(log_dir(), "team-hooks.jsonl")
+
+
+def verified_dir():
+    """Completion sentinels: ~/.claude/logs/verified/<scope>/"""
+    return os.path.join(log_dir(), "verified")
+
+
+def nudge_dir():
+    """Idle loop-guard state: ~/.claude/logs/idle-nudges/"""
+    return os.path.join(log_dir(), "idle-nudges")
 
 
 def read_payload():
@@ -69,8 +84,8 @@ def audit(event, payload, decision, reason=None, extra=None):
         rec.update(extra)
     rec["payload"] = payload
     try:
-        os.makedirs(LOG_DIR, exist_ok=True)
-        with open(LOG_PATH, "a") as fh:
+        os.makedirs(log_dir(), exist_ok=True)
+        with open(log_path(), "a") as fh:
             fh.write(json.dumps(rec) + "\n")
     except Exception:
         pass  # logging must never break a hook

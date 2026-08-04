@@ -38,26 +38,6 @@
     }
   },
   "hooks": {
-    "TaskCreated": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/task_created_format_check.py\""
-          }
-        ]
-      }
-    ],
-    "TaskCompleted": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/task_completed_verify_gate.py\""
-          }
-        ]
-      }
-    ],
     "TeammateIdle": [
       {
         "hooks": [

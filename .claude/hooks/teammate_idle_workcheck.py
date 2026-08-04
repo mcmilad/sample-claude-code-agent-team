@@ -25,7 +25,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from team_hook_common import (  # noqa: E402
-    read_payload, allow, block, audit, load_team_tasks, role_of_teammate, NUDGE_DIR,
+    read_payload, allow, block, audit, load_team_tasks, role_of_teammate, nudge_dir,
 )
 
 EVENT = "TeammateIdle"
@@ -34,7 +34,7 @@ MAX_NUDGES = 2
 
 def _state_path(team, teammate):
     safe = "{}__{}".format(team, teammate).replace("/", "_")
-    return os.path.join(NUDGE_DIR, safe + ".json")
+    return os.path.join(nudge_dir(), safe + ".json")
 
 
 def main():
@@ -85,7 +85,7 @@ def main():
         allow(EVENT, p, reason="nudge cap reached for set {} — allowing idle".format(sig))
 
     try:
-        os.makedirs(NUDGE_DIR, exist_ok=True)
+        os.makedirs(nudge_dir(), exist_ok=True)
         with open(state_path, "w") as fh:
             json.dump({"sig": sig, "count": count + 1}, fh)
     except Exception:
