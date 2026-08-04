@@ -40,6 +40,11 @@ def nudge_dir():
     return os.path.join(log_dir(), "idle-nudges")
 
 
+def tasks_dir():
+    """Team task store: ~/.claude/tasks/<team>/<id>.json"""
+    return os.path.join(_home(), ".claude", "tasks")
+
+
 def read_payload():
     """Read and parse the hook stdin payload. Returns {} on empty/invalid."""
     raw = sys.stdin.read()
@@ -122,7 +127,7 @@ def load_team_tasks(team_name):
     tasks = {}
     if not team_name:
         return tasks
-    d = os.path.join(TASKS_DIR, team_name)
+    d = os.path.join(tasks_dir(), team_name)
     try:
         names = os.listdir(d)
     except Exception:
