@@ -80,8 +80,9 @@ echo "<the Run command> PASSED" > ~/.claude/logs/verified/<projectKey>/<ISSUE-KE
 ```
 
 The transition is **blocked** without it. The sentinel is consumed on success, so one
-sentinel permits one transition. A hook cannot watch you run tests — this file is your
-attestation, so only write it after the command actually passed.
+sentinel permits **one** transition — the reviewer closing the issue later must write its
+own (see "Closing"). A hook cannot watch you run tests — this file is your attestation, so
+only write it after the command actually passed.
 
 Bypass: the `skip-verify` label, for issues with no runnable verification.
 
@@ -129,6 +130,18 @@ Then `SendMessage` the lead. Clear the flag by setting the field to `null` when 
 An implementer must **not** close its own issue: transition to `In Review` and stop
 there. Only the review synthesizer moves `In Review` -> `Done`, and only on a PASS
 verdict.
+
+**The closer writes its own sentinel.** `In Review` and `Done` are *both* gated, and the
+sentinel is consumed on success — so the one the implementer wrote is already gone by the
+time the issue reaches `In Review`. Before transitioning `In Review` -> `Done`, the
+synthesizer writes a fresh sentinel attesting the review verdict:
+
+```bash
+mkdir -p ~/.claude/logs/verified/<projectKey>
+echo "review verdict PASS" > ~/.claude/logs/verified/<projectKey>/<ISSUE-KEY>.verified
+```
+
+Without it the `Done` transition is blocked and the issue can never close.
 
 **Not enforced.** The gate hook checks only that a sentinel exists — not who is
 transitioning, nor what the prior status was. This is a protocol convention, not a

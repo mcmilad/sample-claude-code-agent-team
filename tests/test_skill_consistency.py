@@ -10,6 +10,16 @@ SKILL = os.path.join(REPO, ".claude", "skills", "jira-workflow", "SKILL.md")
 FORMAT_HOOK = os.path.join(REPO, ".claude", "hooks", "jira_issue_format_check.py")
 GATE_HOOK = os.path.join(REPO, ".claude", "hooks", "jira_transition_verify_gate.py")
 
+# Every doc that tells an agent how an issue gets closed. The gate consumes the
+# sentinel on success and gates `Done` as well as `In Review`, so a closer that
+# does not write its own sentinel can never close anything -- if any of these
+# omits that, the documented happy path is unrunnable.
+CLOSING_DOCS = [
+    SKILL,
+    os.path.join(REPO, ".claude", "agents", "review-agent.md"),
+    os.path.join(REPO, ".claude", "rules", "agent-team-protocol.md"),
+]
+
 
 def read(path):
     with open(path) as fh:
@@ -44,6 +54,30 @@ def test_skill_required_sections_match_the_format_hook():
     for section in sections:
         assert section in text, \
             "hook requires {} but the skill never mentions it".format(section)
+
+
+def test_closing_docs_tell_the_closer_to_write_its_own_sentinel():
+    """The gate consumes the sentinel on success and gates `Done` too, so the
+    implementer's sentinel is gone by the time the reviewer closes. Every doc
+    that describes closing must say the closer writes a fresh one, or the
+    documented happy path terminates at `In Review` forever.
+    """
+    for path in CLOSING_DOCS:
+        text = read(path)
+        assert "review verdict PASS" in text, \
+            "{} must show the closer writing its own sentinel".format(path)
+        assert ".verified" in text
+
+
+def test_no_closing_doc_claims_the_gate_spares_the_reviewer():
+    """The gate keys on the target status, not the actor. A doc saying it
+    'normally doesn't gate you' teaches the reviewer to skip the one step
+    without which no issue can ever close.
+    """
+    for path in CLOSING_DOCS:
+        text = read(path).lower()
+        for claim in ("doesn't gate you", "does not gate you", "not you directly"):
+            assert claim not in text, "{} claims the gate spares the reviewer".format(path)
 
 
 def test_skill_sentinel_path_matches_the_gate_hook():

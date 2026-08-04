@@ -47,10 +47,11 @@ backlog is in Jira, not on disk — claim issues per the `jira-workflow` skill a
 the interface contracts in each issue's description. `review.md` is your sole authored
 output and lives alongside the spec.
 
-The verification-sentinel gate (protocol → "Enforced Hooks") blocks `transitionJiraIssue`,
-not you directly. You are **handoff-driven** — the lead messages you and you author
-`review.md` — so it normally doesn't gate you. If you are ever assigned a formal issue, it
-needs the same verification-sentinel / `skip-verify` handling as other teammates.
+The verification-sentinel gate (protocol → "Enforced Hooks") gates **every** transition
+into a gated status (`In Review`, `Done`), regardless of who makes it — including yours.
+Closing an issue is such a transition, so it gates you on every close: see "Closing
+Issues" below. Any formal issue assigned to you needs the same verification-sentinel /
+`skip-verify` handling as other teammates.
 
 ## Required Skills (MANDATORY — Load Before Reviewing)
 
@@ -67,6 +68,18 @@ You are the only role that may transition an issue `In Review` -> `Done`, and on
 PASS verdict. Implementers stop at `In Review` by design — a self-closed issue defeats
 the gate. Post the group verdict as a comment on the sprint's `role-review` issue; there
 is exactly one verdict per cycle.
+
+**Write your own sentinel before every close.** `In Review` and `Done` are both gated and
+the sentinel is *consumed* on success, so the implementer's sentinel is already gone by
+the time the issue reaches you. Without a fresh one the `Done` transition is blocked and
+the issue can never close. For each issue you close, on the PASS verdict:
+
+```bash
+mkdir -p ~/.claude/logs/verified/<projectKey>
+echo "review verdict PASS" > ~/.claude/logs/verified/<projectKey>/<ISSUE-KEY>.verified
+```
+
+Then transition `In Review` -> `Done`.
 
 **Not enforced.** The gate hook checks only that a sentinel exists — not who is
 transitioning, nor what the prior status was. This is a protocol convention, not a

@@ -70,7 +70,20 @@ mkdir -p ~/.claude/logs/verified/<projectKey>
 echo "<the Run command> PASSED" > ~/.claude/logs/verified/<projectKey>/<ISSUE-KEY>.verified
 ```
 
-The sentinel is consumed on success, so it cannot be reused.
+The sentinel is consumed on success, so it cannot be reused — **one sentinel permits one
+transition.** `In Review` and `Done` are both gated, so the implementer's sentinel is
+already consumed by the time the issue sits in `In Review`. **The closer writes its own**:
+before the review synthesizer transitions `In Review` -> `Done` it writes a fresh sentinel
+attesting the verdict, or the close is blocked and the issue can never reach `Done`.
+
+```bash
+mkdir -p ~/.claude/logs/verified/<projectKey>
+echo "review verdict PASS" > ~/.claude/logs/verified/<projectKey>/<ISSUE-KEY>.verified
+```
+
+The gate checks only that a sentinel exists — not who is transitioning, nor the prior
+status. Reserving the close for the synthesizer stays a protocol convention, not a
+machine-enforced guardrail.
 - **Bypass**: the `skip-verify` label.
 
 ### 3. Mirror journal (`PostToolUse` on the Jira mutation tools)
