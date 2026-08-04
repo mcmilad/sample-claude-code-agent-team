@@ -102,11 +102,13 @@ class JiraAdmin:
 
     # -- discovery -------------------------------------------------------
 
-    def discover_ids(self, project_key):
-        """Resolve per-site field, status, transition and board IDs.
+    def discover_ids(self, project_key, existing_cloud_id=""):
+        """Resolve per-site field, status, transition, board and cloud IDs.
 
         Nothing here may be hardcoded: these IDs differ per site, and this repo
-        is a public template.
+        is a public template. `existing_cloud_id` is the value already on disk
+        (if any), used as a fallback when the tenant_info lookup can't confirm
+        a value -- see the cloudId block below.
         """
         fields = {}
         by_name = {f.get("name"): f.get("id") for f in self.request("GET", "/rest/api/3/field")}
@@ -162,8 +164,27 @@ class JiraAdmin:
         # not silently retried.
         missing_gated_transitions = [s for s in gated if s not in transitions.values()]
 
+        # Every Atlassian MCP tool call (createJiraIssue, transitionJiraIssue,
+        # searchJiraIssuesUsingJql, ...) requires cloudId as a parameter, and
+        # it's the first thing the jira-workflow skill tells agents to read
+        # from this config -- so an empty value here breaks every agent's
+        # first MCP call. The lookup needs no auth, but unlike the To Do and
+        # gated-transition preconditions, a failure here is recoverable (the
+        # operator can supply it by hand), so it must not abort setup: fall
+        # back to whatever the existing config held rather than blanking a
+        # good value with an empty string.
+        cloud_id = existing_cloud_id or ""
+        try:
+            tenant_info = self.request("GET", "/_edge/tenant_info")
+        except (urllib.error.URLError, ValueError):
+            tenant_info = {}
+        discovered_cloud_id = (tenant_info or {}).get("cloudId")
+        if discovered_cloud_id:
+            cloud_id = discovered_cloud_id
+
         return {
             "site": self.site,
+            "cloudId": cloud_id,
             "projectKey": project_key,
             "boardId": board_id,
             "fields": fields,
@@ -250,8 +271,8 @@ def main(argv=None):
         if args.command == "ensure-project":
             project = admin.ensure_project(args.key, args.name)
             print("project {} ready (id {})".format(project.get("key"), project.get("id")))
-            config = admin.discover_ids(args.key)
-            config["cloudId"] = read_config(CONFIG_PATH).get("cloudId", "")
+            existing_cloud_id = read_config(CONFIG_PATH).get("cloudId", "")
+            config = admin.discover_ids(args.key, existing_cloud_id=existing_cloud_id)
             write_config(CONFIG_PATH, config)
             if _fail_if_required_status_missing(config):
                 return 3
@@ -261,8 +282,8 @@ def main(argv=None):
             return 0
 
         if args.command == "discover":
-            config = admin.discover_ids(args.key)
-            config["cloudId"] = read_config(CONFIG_PATH).get("cloudId", "")
+            existing_cloud_id = read_config(CONFIG_PATH).get("cloudId", "")
+            config = admin.discover_ids(args.key, existing_cloud_id=existing_cloud_id)
             write_config(CONFIG_PATH, config)
             print("wrote {}".format(CONFIG_PATH))
             if _fail_if_required_status_missing(config):

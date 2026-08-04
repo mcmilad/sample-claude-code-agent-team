@@ -4,11 +4,17 @@ runtime. Tests stub the transport rather than the network.
 import json
 import os
 import sys
+import urllib.error
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 
 import jira_bootstrap  # noqa: E402
+
+# Real cloud id for the site this will eventually run against (mcmilad.atlassian.net).
+# Used only as fixture data here -- never referenced by the implementation, and no
+# test makes a live call to this or any other site.
+A_CLOUD_ID = "a92ccd30-64c9-4992-a6a3-fb5cc92cbeb9"
 
 
 class FakeTransport:
@@ -90,6 +96,7 @@ def test_discover_ids_maps_fields_statuses_and_transitions():
             {"id": "31", "to": {"name": "Done"}},
         ]},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
+        "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
     cfg = a.discover_ids("AGENT")
     assert cfg["fields"]["sprint"] == "customfield_10020"
@@ -113,6 +120,7 @@ def test_discover_ids_flags_a_project_with_no_to_do_status():
             ]}],
         "GET /rest/api/3/search": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
+        "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
     cfg = a.discover_ids("AGENT")
     assert cfg["missingRequiredStatus"] == "To Do"
@@ -125,6 +133,7 @@ def test_discover_ids_does_not_flag_a_project_that_has_to_do():
             {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
         "GET /rest/api/3/search": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
+        "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
     assert a.discover_ids("AGENT").get("missingRequiredStatus") is None
 
@@ -137,7 +146,7 @@ def test_main_exits_nonzero_when_to_do_is_absent(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(jira_bootstrap, "CONFIG_PATH", str(tmp_path / "jira-config.json"))
     monkeypatch.setattr(
         jira_bootstrap.JiraAdmin, "discover_ids",
-        lambda self, key: {"projectKey": key, "statuses": {"Backlog": "1"},
+        lambda self, key, **kwargs: {"projectKey": key, "statuses": {"Backlog": "1"},
                            "missingRequiredStatus": "To Do"},
     )
     code = jira_bootstrap.main(["discover", "--key", "AGENT"])
@@ -155,6 +164,7 @@ def test_discover_ids_reports_missing_in_review_status():
             ]}],
         "GET /rest/api/3/search": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
+        "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
     cfg = a.discover_ids("AGENT")
     assert "In Review" not in cfg["statuses"]
@@ -185,6 +195,7 @@ def test_discover_ids_unions_transitions_across_distinct_statuses():
             {"id": "31", "to": {"name": "Done"}},
         ]},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
+        "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
     cfg = a.discover_ids("AGENT")
     assert cfg["transitions"]["21"] == "In Progress"
@@ -205,6 +216,7 @@ def test_discover_ids_reports_missing_gated_transitions_with_no_issues():
             ]}],
         "GET /rest/api/3/search": {"issues": []},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
+        "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
     cfg = a.discover_ids("AGENT")
     assert cfg["transitions"] == {}
@@ -227,9 +239,71 @@ def test_discover_ids_reports_no_missing_gated_transitions_when_complete():
             {"id": "31", "to": {"name": "Done"}},
         ]},
         "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
+        "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
     })
     cfg = a.discover_ids("AGENT")
     assert cfg["missingGatedTransitions"] == []
+
+
+def test_discover_ids_populates_cloud_id_from_tenant_info():
+    """Every Atlassian MCP tool call requires cloudId, and the jira-workflow
+    skill's first instruction to agents is to read it from this config -- so
+    it must be discovered, not left blank."""
+    a = admin({
+        "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
+        "GET /rest/api/3/project/AGENT/statuses": [
+            {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
+        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/agile/1.0/board": {"values": []},
+        "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
+    })
+    cfg = a.discover_ids("AGENT")
+    assert cfg["cloudId"] == A_CLOUD_ID
+
+
+def test_discover_ids_keeps_existing_cloud_id_when_tenant_info_is_empty():
+    """An empty/unusable tenant_info response must not blank a value already
+    on disk -- the fallback is the whole point of carrying it forward."""
+    a = admin({
+        "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
+        "GET /rest/api/3/project/AGENT/statuses": [
+            {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
+        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/agile/1.0/board": {"values": []},
+        "GET /_edge/tenant_info": {},
+    })
+    cfg = a.discover_ids("AGENT", existing_cloud_id="previously-known-id")
+    assert cfg["cloudId"] == "previously-known-id"
+
+
+def test_discover_ids_keeps_existing_cloud_id_when_tenant_info_lookup_fails():
+    """A cloud-id lookup failure (network error) must not abort setup -- unlike
+    the To Do and gated-transition preconditions, this one is recoverable: the
+    operator can supply the value by hand."""
+    inner = FakeTransport({
+        "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
+        "GET /rest/api/3/project/AGENT/statuses": [
+            {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
+        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/agile/1.0/board": {"values": []},
+    })
+
+    def flaky(method, url, body, headers):
+        if "/_edge/tenant_info" in url:
+            raise urllib.error.URLError("no route to host")
+        return inner(method, url, body, headers)
+
+    a = jira_bootstrap.JiraAdmin("example.atlassian.net", "me@example.com", "tok")
+    a.transport = flaky
+    cfg = a.discover_ids("AGENT", existing_cloud_id="previously-known-id")
+    assert cfg["cloudId"] == "previously-known-id"
+
+
+def test_write_config_round_trips_cloud_id(tmp_path):
+    path = tmp_path / "jira-config.json"
+    jira_bootstrap.write_config(str(path), {"cloudId": A_CLOUD_ID})
+    with open(path) as fh:
+        assert json.load(fh)["cloudId"] == A_CLOUD_ID
 
 
 def test_main_exits_with_4_when_gated_transitions_incomplete(monkeypatch, tmp_path, capsys):
@@ -241,7 +315,7 @@ def test_main_exits_with_4_when_gated_transitions_incomplete(monkeypatch, tmp_pa
     monkeypatch.setattr(jira_bootstrap, "CONFIG_PATH", str(tmp_path / "jira-config.json"))
     monkeypatch.setattr(
         jira_bootstrap.JiraAdmin, "discover_ids",
-        lambda self, key: {"projectKey": key, "statuses": {"To Do": "1", "Done": "2"},
+        lambda self, key, **kwargs: {"projectKey": key, "statuses": {"To Do": "1", "Done": "2"},
                            "missingRequiredStatus": None,
                            "gatedStatuses": ["Done"],
                            "transitions": {},
