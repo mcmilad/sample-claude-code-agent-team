@@ -38,6 +38,37 @@
     }
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_atlassian_atlassian__createJiraIssue",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/jira_issue_format_check.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__plugin_atlassian_atlassian__transitionJiraIssue",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/jira_transition_verify_gate.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__plugin_atlassian_atlassian__(createJiraIssue|editJiraIssue|transitionJiraIssue|addCommentToJiraIssue)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/jira_mirror_journal.py\""
+          }
+        ]
+      }
+    ],
     "TeammateIdle": [
       {
         "hooks": [

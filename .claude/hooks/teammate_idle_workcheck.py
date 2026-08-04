@@ -1,32 +1,36 @@
 #!/usr/bin/env python3
-"""TeammateIdle hook — nudge a teammate to claim claimable work before idling.
+"""TeammateIdle hook -- nudge a teammate to claim claimable work before idling.
 
-Exit 2 keeps the teammate working and delivers the nudge via stderr. The hook
-reads the team task store at ~/.claude/tasks/<team_name>/ and looks for tasks
-that are ALL of:
-  - status 'pending',
-  - unclaimed (no owner),
-  - unblocked (every id in blockedBy is completed/absent), and
-  - tagged with this teammate's role (e.g. coding-agent -> [coding]).
+Exit 2 keeps the teammate working and delivers the nudge via stderr.
+
+Data source is the local mirror journal, not Jira: a hook subprocess holds no
+OAuth token. Claimable means, in mirror state:
+  - status 'To Do' (unclaimed is a status, not a label -- JQL cannot wildcard
+    labels, so claim state is encoded in status),
+  - a role-<mine> label matching this teammate's role, and
+  - no agent-* label.
+
+Known blind spot: the mirror only sees mutations made through the MCP, so a
+card dragged by hand on the board is invisible here until an agent next touches
+it. Acceptable -- this nudge is advisory and fail-open.
 
 LOOP GUARD (critical): a naive nudge would trap a teammate forever. State at
-~/.claude/logs/idle-nudges/<team>__<teammate>.json tracks how many times we've
-nudged for the *same* claimable set. After MAX_NUDGES the teammate is allowed to
-idle. When the claimable set changes the counter resets; when it empties the
-state file is cleared.
+~/.claude/logs/idle-nudges/<team>__<teammate>.json tracks how many times we have
+nudged for the SAME claimable set. After MAX_NUDGES the teammate may idle. A
+changed set resets the counter; an emptied set clears the state file.
 
 FAIL OPEN: any internal error allows idle.
 """
 import hashlib
 import json
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from team_hook_common import (  # noqa: E402
-    read_payload, allow, block, audit, load_team_tasks, role_of_teammate, nudge_dir,
+    read_payload, allow, block, audit, role_of_teammate, nudge_dir,
 )
+import jira_mirror  # noqa: E402
 
 EVENT = "TeammateIdle"
 MAX_NUDGES = 2
@@ -42,37 +46,36 @@ def main():
     team = p.get("team_name")
     teammate = p.get("teammate_name")
     role = role_of_teammate(teammate)
-    state_path = _state_path(team, teammate)
-
     if not team or not role:
-        allow(EVENT, p, reason="no team or unmapped role — not nudging")
+        allow(EVENT, p, reason="no team or unmapped role -- not nudging")
 
-    tasks = load_team_tasks(team)
-    done = {tid for tid, t in tasks.items() if t.get("status") == "completed"}
-    role_tag = re.compile(r"\[%s\]" % role, re.I)
+    cfg = jira_mirror.load_config()
+    project = cfg.get("projectKey")
+    if not project:
+        allow(EVENT, p, reason="no projectKey configured -- not nudging")
 
+    role_label = "role-" + role
     claimable = []
-    for tid, t in tasks.items():
-        if t.get("status") != "pending":
+    for key, issue in jira_mirror.load_state(project).items():
+        labels = issue.get("labels") or []
+        if issue.get("status") != "To Do":
             continue
-        if t.get("owner"):
+        if role_label not in labels:
             continue
-        if any(b not in done for b in t.get("blockedBy", []) or []):
+        if jira_mirror.agent_label(labels):
             continue
-        if not role_tag.search("{} {}".format(t.get("subject", ""), t.get("description", ""))):
-            continue
-        claimable.append(tid)
-    claimable.sort(key=lambda x: (len(x), x))
+        claimable.append(key)
+    claimable.sort()
 
+    state_path = _state_path(team, teammate)
     if not claimable:
-        # Nothing to do — let it idle and clear any stale nudge state.
         try:
             os.remove(state_path)
         except Exception:
             pass
-        allow(EVENT, p, reason="no claimable tasks for role [{}]".format(role))
+        allow(EVENT, p, reason="no claimable {} work".format(role_label))
 
-    sig = hashlib.sha1((",".join(claimable)).encode()).hexdigest()[:12]
+    sig = hashlib.sha1(",".join(claimable).encode()).hexdigest()[:12]
     state = {}
     try:
         with open(state_path) as fh:
@@ -82,7 +85,7 @@ def main():
     count = state.get("count", 0) if state.get("sig") == sig else 0
 
     if count >= MAX_NUDGES:
-        allow(EVENT, p, reason="nudge cap reached for set {} — allowing idle".format(sig))
+        allow(EVENT, p, reason="nudge cap reached for set {} -- allowing idle".format(sig))
 
     try:
         os.makedirs(nudge_dir(), exist_ok=True)
@@ -91,12 +94,17 @@ def main():
     except Exception:
         pass
 
-    reason = (
-        "Before idling: {} unclaimed, unblocked [{}] task(s) are available — "
-        "#{}. Claim one with TaskUpdate(owner='{}', status='in_progress') and work it, "
-        "or send the lead a one-line note that you're genuinely done. (nudge {}/{})"
-    ).format(len(claimable), role, ", #".join(claimable), teammate, count + 1, MAX_NUDGES)
-    block(EVENT, p, reason)
+    block(EVENT, p, (
+        "Before idling: {} unclaimed {} issue(s) are available -- {}.\n"
+        "Claim one:\n"
+        "  1. getJiraIssue to read its current labels\n"
+        "  2. editJiraIssue fields.labels = <existing labels> + ['agent-{}']\n"
+        "  3. transitionJiraIssue to In Progress\n"
+        "  4. re-read; if another agent-* label appeared, lowest instance name "
+        "wins and the loser drops its label and picks another issue\n"
+        "Or send the lead a one-line note that you are genuinely done. (nudge {}/{})"
+    ).format(len(claimable), role_label, ", ".join(claimable), teammate,
+             count + 1, MAX_NUDGES))
 
 
 if __name__ == "__main__":

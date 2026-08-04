@@ -1,15 +1,15 @@
 """Shared helpers for the agent-team enforcement hooks.
 
-Imported by jira_issue_format_check.py, jira_transition_verify_gate.py and
-teammate_idle_workcheck.py. Responsibilities:
+Imported by jira_issue_format_check.py, jira_transition_verify_gate.py,
+jira_mirror_journal.py and teammate_idle_workcheck.py. Responsibilities:
   - parse the stdin JSON payload the harness delivers to a hook,
   - append an audit record to ~/.claude/logs/team-hooks.jsonl for every decision,
   - implement the documented exit-code contract: 0 = proceed, 2 = block + the
     stderr text is fed back as the reason.
 
 Design rule for ALL hooks: FAIL OPEN. Any unexpected condition must resolve to
-allow() — a hook bug must never be able to roll back a task, prevent a valid
-completion, or trap a teammate. Enforcement is a guardrail, not a tripwire.
+allow() -- a hook bug must never block a valid action or trap a teammate.
+Enforcement is a guardrail, not a tripwire.
 """
 import json
 import os
@@ -38,11 +38,6 @@ def verified_dir():
 def nudge_dir():
     """Idle loop-guard state: ~/.claude/logs/idle-nudges/"""
     return os.path.join(log_dir(), "idle-nudges")
-
-
-def tasks_dir():
-    """Team task store: ~/.claude/tasks/<team>/<id>.json"""
-    return os.path.join(_home(), ".claude", "tasks")
 
 
 def read_payload():
@@ -120,25 +115,3 @@ def role_of_teammate(name):
         if n == role or n.startswith(role + "-") or n.startswith(role):
             return role
     return None
-
-
-def load_team_tasks(team_name):
-    """Load every <id>.json in ~/.claude/tasks/<team_name>/ as {id: task_dict}."""
-    tasks = {}
-    if not team_name:
-        return tasks
-    d = os.path.join(tasks_dir(), team_name)
-    try:
-        names = os.listdir(d)
-    except Exception:
-        return tasks
-    for fn in names:
-        if not fn.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(d, fn)) as fh:
-                t = json.load(fh)
-            tasks[str(t.get("id", fn[:-5]))] = t
-        except Exception:
-            continue
-    return tasks
