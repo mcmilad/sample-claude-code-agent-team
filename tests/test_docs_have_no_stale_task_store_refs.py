@@ -28,6 +28,7 @@ MIGRATED = [
     ".claude/agents/review-agent.md",
     ".claude/agents/sa-agent.md",
     ".claude/agents/fullstack-agent.md",
+    ".claude/skills/spec-workflow/SKILL.md",
 ]
 
 TEAMMATES = [
