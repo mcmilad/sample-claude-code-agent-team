@@ -20,6 +20,11 @@ Usage:
     export JIRA_API_TOKEN=...            # id.atlassian.com > Security > API tokens
 
     python3 scripts/jira_bootstrap.py ensure-project --key AGENT --name "Agent Team"
+    # Create the first few issues now, at least one per workflow status. `discover`
+    # unions the transition map from real issues' current-status transitions, so on
+    # a brand-new project with none yet, that map is necessarily empty -- and
+    # `discover` will fail by design (exit 4) until issues exist to sample. This
+    # ordering is intentional; don't try to work around it.
     python3 scripts/jira_bootstrap.py discover --key AGENT
     python3 scripts/jira_bootstrap.py sprint-open --name "Group 1 - interfaces"
     python3 scripts/jira_bootstrap.py sprint-close --id 42
@@ -115,14 +120,21 @@ class JiraAdmin:
             for status in issue_type.get("statuses", []):
                 statuses[status["name"]] = status["id"]
 
-        # Transition ids are only readable from a real issue. Absent one, the
-        # map stays empty and the verify gate fails open until re-run.
+        # Transition ids are only readable from a real issue, and Jira only
+        # returns transitions reachable from that issue's *current* status --
+        # sampling a single issue therefore only ever covers one status's
+        # outbound edges. Probe one representative issue per distinct status
+        # (capped at one page) and union the resulting id -> target-name maps.
         transitions = {}
         probe = self.request(
-            "GET", "/rest/api/3/search?jql=project%3D{}&maxResults=1".format(project_key))
-        issues = probe.get("issues", [])
-        if issues:
-            key = issues[0]["key"]
+            "GET", "/rest/api/3/search?jql=project%3D{}&maxResults=50&fields=status".format(
+                project_key))
+        representative_by_status = {}
+        for issue in probe.get("issues", []):
+            status_name = ((issue.get("fields") or {}).get("status") or {}).get("name")
+            if status_name and status_name not in representative_by_status:
+                representative_by_status[status_name] = issue["key"]
+        for key in representative_by_status.values():
             for t in self.request(
                     "GET", "/rest/api/3/issue/{}/transitions".format(key)).get("transitions", []):
                 target = (t.get("to") or {}).get("name")
@@ -140,6 +152,16 @@ class JiraAdmin:
         # a guardrail that silently does nothing is worse than none.
         gated = [s for s in PREFERRED_GATED if s in statuses]
 
+        # A gated status with no inbound transition id in the map means the
+        # verify gate resolves that transition to "unknown target" and fails
+        # open -- waving through exactly the transition (e.g. into Done) it
+        # exists to block, while looking correctly installed. Union-sampling
+        # only covers statuses a *current* issue occupies, so on a fresh
+        # project (no issues yet) this is non-empty by construction; that is
+        # surfaced as a hard failure by _fail_if_transition_map_incomplete,
+        # not silently retried.
+        missing_gated_transitions = [s for s in gated if s not in transitions.values()]
+
         return {
             "site": self.site,
             "projectKey": project_key,
@@ -148,6 +170,7 @@ class JiraAdmin:
             "statuses": statuses,
             "transitions": transitions,
             "gatedStatuses": gated,
+            "missingGatedTransitions": missing_gated_transitions,
             # 'To Do' is a contract, not a discovery: "unclaimed" is encoded as a
             # status because JQL cannot wildcard labels, so the journaller and the
             # idle check both treat it as a literal. A board lacking it must fail
@@ -232,6 +255,8 @@ def main(argv=None):
             write_config(CONFIG_PATH, config)
             if _fail_if_required_status_missing(config):
                 return 3
+            if _fail_if_transition_map_incomplete(config):
+                return 4
             _warn_if_no_in_review(config)
             return 0
 
@@ -242,6 +267,8 @@ def main(argv=None):
             print("wrote {}".format(CONFIG_PATH))
             if _fail_if_required_status_missing(config):
                 return 3
+            if _fail_if_transition_map_incomplete(config):
+                return 4
             _warn_if_no_in_review(config)
             return 0
 
@@ -292,6 +319,34 @@ def _fail_if_required_status_missing(config):
             config.get("projectKey", "?"), missing,
             ", ".join(sorted(config.get("statuses") or {})) or "(none)",
             config.get("projectKey", "AGENT")),
+        file=sys.stderr)
+    return True
+
+
+def _fail_if_transition_map_incomplete(config):
+    """Hard precondition: every gated status must have a mapped inbound transition id.
+
+    Returns True when setup should abort. Same treatment as the missing-'To Do'
+    case, and for the same reason: an unmapped transition id resolves to
+    "unknown target" in the verify gate, which fails open -- silently waving
+    through exactly the transitions (e.g. into Done) it exists to block, while
+    looking correctly installed. Union-sampling only covers statuses a *current*
+    issue occupies, so on a brand-new project (no issues yet) this fires on the
+    very first `discover` call. That is intended: create issues covering each
+    gated status, then re-run.
+    """
+    missing = config.get("missingGatedTransitions") or []
+    if not missing:
+        return False
+    print(
+        "\nERROR: no transition id maps to: {}.\n"
+        "The verify gate resolves an unmapped transition id to 'unknown target',\n"
+        "which fails open -- it would silently allow exactly the transitions into\n"
+        "{} that it exists to block, while looking correctly installed.\n\n"
+        "Fix it, then re-run this command:\n"
+        "  1. Create (or move) at least one issue into each of these statuses\n"
+        "  2. python3 scripts/jira_bootstrap.py discover --key {}\n".format(
+            ", ".join(missing), ", ".join(missing), config.get("projectKey", "AGENT")),
         file=sys.stderr)
     return True
 

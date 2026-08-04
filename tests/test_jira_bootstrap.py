@@ -81,7 +81,9 @@ def test_discover_ids_maps_fields_statuses_and_transitions():
                 {"id": "10002", "name": "Done"},
             ]},
         ],
-        "GET /rest/api/3/search": {"issues": [{"key": "AGENT-1"}]},
+        "GET /rest/api/3/search": {"issues": [
+            {"key": "AGENT-1", "fields": {"status": {"name": "To Do"}}},
+        ]},
         "GET /rest/api/3/issue/AGENT-1/transitions": {"transitions": [
             {"id": "11", "to": {"name": "To Do"}},
             {"id": "21", "to": {"name": "In Progress"}},
@@ -158,6 +160,96 @@ def test_discover_ids_reports_missing_in_review_status():
     assert "In Review" not in cfg["statuses"]
     assert cfg["gatedStatuses"] == ["Done"], \
         "gate only on statuses that actually exist, or every transition fails open"
+
+
+def test_discover_ids_unions_transitions_across_distinct_statuses():
+    """Jira only returns transitions reachable from an issue's *current* status,
+    so sampling a single issue only ever covers one status's outbound edges.
+    Probe one representative issue per distinct status and union the results."""
+    a = admin({
+        "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
+        "GET /rest/api/3/project/AGENT/statuses": [
+            {"name": "Task", "statuses": [
+                {"id": "10000", "name": "To Do"},
+                {"id": "10001", "name": "In Progress"},
+                {"id": "10002", "name": "Done"},
+            ]}],
+        "GET /rest/api/3/search": {"issues": [
+            {"key": "AGENT-1", "fields": {"status": {"name": "To Do"}}},
+            {"key": "AGENT-2", "fields": {"status": {"name": "In Progress"}}},
+        ]},
+        "GET /rest/api/3/issue/AGENT-1/transitions": {"transitions": [
+            {"id": "21", "to": {"name": "In Progress"}},
+        ]},
+        "GET /rest/api/3/issue/AGENT-2/transitions": {"transitions": [
+            {"id": "31", "to": {"name": "Done"}},
+        ]},
+        "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
+    })
+    cfg = a.discover_ids("AGENT")
+    assert cfg["transitions"]["21"] == "In Progress"
+    assert cfg["transitions"]["31"] == "Done"
+    assert cfg["missingGatedTransitions"] == []
+
+
+def test_discover_ids_reports_missing_gated_transitions_with_no_issues():
+    """A fresh project has no issues to sample, so the transition map is empty
+    by construction. That must surface as a loud, actionable shortfall -- not
+    a verify gate that quietly fails open on the very transitions it guards."""
+    a = admin({
+        "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
+        "GET /rest/api/3/project/AGENT/statuses": [
+            {"name": "Task", "statuses": [
+                {"id": "10000", "name": "To Do"},
+                {"id": "10002", "name": "Done"},
+            ]}],
+        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
+    })
+    cfg = a.discover_ids("AGENT")
+    assert cfg["transitions"] == {}
+    assert cfg["missingGatedTransitions"] == ["Done"]
+
+
+def test_discover_ids_reports_no_missing_gated_transitions_when_complete():
+    a = admin({
+        "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
+        "GET /rest/api/3/project/AGENT/statuses": [
+            {"name": "Task", "statuses": [
+                {"id": "10000", "name": "To Do"},
+                {"id": "10001", "name": "In Progress"},
+                {"id": "10002", "name": "Done"},
+            ]}],
+        "GET /rest/api/3/search": {"issues": [
+            {"key": "AGENT-1", "fields": {"status": {"name": "In Progress"}}},
+        ]},
+        "GET /rest/api/3/issue/AGENT-1/transitions": {"transitions": [
+            {"id": "31", "to": {"name": "Done"}},
+        ]},
+        "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
+    })
+    cfg = a.discover_ids("AGENT")
+    assert cfg["missingGatedTransitions"] == []
+
+
+def test_main_exits_with_4_when_gated_transitions_incomplete(monkeypatch, tmp_path, capsys):
+    """The transition-completeness precondition must break the build too, and
+    with a code distinct from the missing-'To Do' case (3) and HTTP errors (2)."""
+    monkeypatch.setenv("JIRA_SITE", "example.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "me@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "tok")
+    monkeypatch.setattr(jira_bootstrap, "CONFIG_PATH", str(tmp_path / "jira-config.json"))
+    monkeypatch.setattr(
+        jira_bootstrap.JiraAdmin, "discover_ids",
+        lambda self, key: {"projectKey": key, "statuses": {"To Do": "1", "Done": "2"},
+                           "missingRequiredStatus": None,
+                           "gatedStatuses": ["Done"],
+                           "transitions": {},
+                           "missingGatedTransitions": ["Done"]},
+    )
+    code = jira_bootstrap.main(["discover", "--key", "AGENT"])
+    assert code == 4
+    assert "Done" in capsys.readouterr().err
 
 
 def test_open_sprint_creates_then_starts():
