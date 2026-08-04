@@ -101,6 +101,37 @@ def test_epics_are_exempt(tmp_path):
     assert proc.returncode == 0
 
 
+def test_stringified_additional_fields_does_not_defeat_the_check(tmp_path):
+    """A model that emits additional_fields as a JSON *string* is a documented
+    failure mode. `(x or {}).get(...)` raises AttributeError on it, the outer
+    fail-open handler exits 0, and a malformed issue sails through the gate --
+    the check must still see the summary/description problems.
+    """
+    proc = run_hook(well_formed(
+        summary="implement POST /login handler",
+        additional_fields='{"labels": ["spec-auth-api", "role-coding"]}',
+    ), tmp_path)
+    assert proc.returncode == 2
+    assert "role tag" in proc.stderr.lower()
+
+
+def test_stringified_additional_fields_is_treated_as_no_labels(tmp_path):
+    """Labels the hook cannot parse are labels it does not have: an unreadable
+    additional_fields must not smuggle a missing role-*/spec-* past the check.
+    """
+    proc = run_hook(well_formed(additional_fields='{"labels": ["role-coding"]}'), tmp_path)
+    assert proc.returncode == 2
+    assert "role-" in proc.stderr
+
+
+def test_stringified_additional_fields_cannot_smuggle_a_bypass_label(tmp_path):
+    proc = run_hook(well_formed(
+        summary="no tag here",
+        additional_fields='{"labels": ["skip-format-check"]}',
+    ), tmp_path)
+    assert proc.returncode == 2, "an unparseable bypass label is not a bypass"
+
+
 def test_ignores_issues_in_other_projects(tmp_path):
     proc = run_hook(well_formed(projectKey="SCRUM", summary="MUFG - SCCM",
                                 description="", additional_fields={}), tmp_path)

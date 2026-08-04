@@ -23,7 +23,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from team_hook_common import read_payload, allow, block, audit  # noqa: E402
+from team_hook_common import read_payload, allow, block, audit, as_dict  # noqa: E402
 import jira_mirror  # noqa: E402
 
 EVENT = "PreToolUse"
@@ -49,7 +49,11 @@ def main():
     if str(tool_input.get("issueTypeName", "")).lower() == "epic":
         allow(EVENT, p, reason="epics are exempt from the task shape")
 
-    labels = ((tool_input.get("additional_fields") or {}).get("labels")) or []
+    # as_dict, not `or {}`: additional_fields commonly arrives as a JSON string.
+    # `or {}` lets that through and .get() raises, the outer handler fails open,
+    # and a role-tagless, section-less, label-less issue is created unchecked.
+    # Unreadable labels are treated as no labels -- including bypass labels.
+    labels = (as_dict(tool_input.get("additional_fields")).get("labels")) or []
     labels = [str(x) for x in labels] if isinstance(labels, list) else []
     if "skip-format-check" in labels:
         allow(EVENT, p, reason="bypass label present")

@@ -72,6 +72,25 @@ def safe_path_component(value, default="_"):
     return s
 
 
+def as_dict(value):
+    """Coalesce a value to a dict before .get(), guarding on *type* rather than
+    truthiness.
+
+    `value or {}` only guards falsy values (None, {}, [], ""). A truthy
+    non-dict passes through unchanged and raises AttributeError on the next
+    .get() -- which the outer fail-open handler then swallows, so the hook
+    exits 0 and the guardrail silently does nothing. The concrete case: a model
+    emitting `additional_fields` as a JSON *string* instead of an object, a
+    well-documented failure mode. Every value a hook reads out of a tool
+    payload is model-authored, so its type is never guaranteed.
+
+    (scripts/jira_bootstrap.py carries its own copy as `_as_dict`. It must stay
+    standard-library-only and must not import from the hooks directory, so a
+    five-line duplicate beats a cross-tree import.)
+    """
+    return value if isinstance(value, dict) else {}
+
+
 def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -106,12 +125,16 @@ def block(event, payload, reason, extra=None):
 
 
 def role_of_teammate(name):
-    """Map a teammate name (e.g. 'coding-agent') to its task role tag, or None."""
+    """Map a teammate name (e.g. 'coding-agent', 'coding-2') to its role, or None.
+
+    Only an exact match or a `<role>-` instance suffix counts. A bare prefix
+    match would over-match: 'sample-1'.startswith('sa') is true, which would
+    hand a teammate named 'sample-1' the sa pool's unclaimed work.
+    """
     if not name:
         return None
-    n = name.lower()
-    # Order matters only for disjoint prefixes; our roles don't overlap.
+    n = str(name).lower()
     for role in ("coding", "devops", "sa", "review"):
-        if n == role or n.startswith(role + "-") or n.startswith(role):
+        if n == role or n.startswith(role + "-"):
             return role
     return None

@@ -93,6 +93,33 @@ def test_ignores_other_projects(tmp_path):
     assert run_hook(env, issue="SCRUM-2", transition_id="41").returncode == 0
 
 
+def test_empty_gated_statuses_is_honoured_not_treated_as_unconfigured(tmp_path):
+    """`cfg.get(...) or DEFAULT` cannot tell "no gated statuses exist on this
+    board" from "nobody configured this". Falling back to the defaults there
+    gates two status names the board does not have, so nothing is really gated
+    while the audit log claims otherwise. An explicit [] means [] -- and
+    bootstrap is where an empty gate set must fail loudly (exit 5).
+    """
+    config = dict(CONFIG, gatedStatuses=[])
+    env, home = setup_env(tmp_path, config)
+    assert run_hook(env, transition_id="41").returncode == 0, \
+        "an explicitly empty gate set gates nothing -- it is not a fallback trigger"
+
+
+def test_missing_gated_statuses_key_still_falls_back_to_the_defaults(tmp_path):
+    config = {"projectKey": "AGENT", "transitions": {"41": "Done"}}
+    env, home = setup_env(tmp_path, config)
+    assert run_hook(env, transition_id="41").returncode == 2, \
+        "genuinely unconfigured must keep gating the default statuses"
+
+
+def test_non_list_gated_statuses_falls_back_to_the_defaults(tmp_path):
+    config = dict(CONFIG, gatedStatuses="Done")
+    env, home = setup_env(tmp_path, config)
+    assert run_hook(env, transition_id="41").returncode == 2, \
+        "a malformed value is unconfigured, not a licence to gate nothing"
+
+
 def test_fails_open_on_unknown_transition_id(tmp_path):
     env, home = setup_env(tmp_path)
     assert run_hook(env, transition_id="99").returncode == 0, \

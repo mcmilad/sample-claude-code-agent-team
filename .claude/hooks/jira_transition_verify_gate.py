@@ -75,7 +75,14 @@ def main():
         allow(EVENT, p, reason="transition id {} not in discovered map -- fail-open".format(
             transition_id))
 
-    gated = cfg.get("gatedStatuses") or list(DEFAULT_GATED)
+    # isinstance, not truthiness: `x or DEFAULT` cannot tell "discovery found no
+    # gated status on this board" ([]) from "nobody configured this" (absent).
+    # Falling back on [] gates two status names the board does not have, so
+    # nothing is really gated while the audit log claims a gate is in force. An
+    # explicit [] is honoured as-is; bootstrap fails at setup (exit 5) rather
+    # than shipping an empty gate set.
+    configured = cfg.get("gatedStatuses")
+    gated = configured if isinstance(configured, list) else list(DEFAULT_GATED)
     if target not in gated:
         allow(EVENT, p, reason="target status {} is not gated".format(target))
 

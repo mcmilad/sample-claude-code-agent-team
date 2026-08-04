@@ -171,6 +171,11 @@ class JiraAdmin:
         # Gate only on statuses that exist. Gating on an absent 'In Review'
         # would make every transition resolve to unknown and fail open --
         # a guardrail that silently does nothing is worse than none.
+        # If that leaves NOTHING gated (a To Do / In Progress / Complete board),
+        # the same reasoning applies to the whole gate: setup must fail, because
+        # missingGatedTransitions is then vacuously empty and every other
+        # precondition passes while the verification guardrail does nothing.
+        # See _fail_if_no_status_is_gated.
         gated = [s for s in PREFERRED_GATED if s in statuses]
 
         # A gated status with no inbound transition id in the map means the
@@ -207,6 +212,11 @@ class JiraAdmin:
             "projectKey": project_key,
             "boardId": board_id,
             "fields": fields,
+            # An alias that resolved to nothing is a field readers still use
+            # unconditionally -- config.fields.flagged drives the whole blocker
+            # protocol. Surfaced as a NOTE so the operator can map or rename the
+            # field rather than discover the gap as silence at runtime.
+            "unresolvedFields": sorted(a for a in FIELD_ALIASES if a not in fields),
             "statuses": statuses,
             "transitions": transitions,
             "gatedStatuses": gated,
@@ -295,9 +305,12 @@ def main(argv=None):
             write_config(CONFIG_PATH, config)
             if _fail_if_required_status_missing(config):
                 return 3
+            if _fail_if_no_status_is_gated(config):
+                return 5
             if _fail_if_transition_map_incomplete(config):
                 return 4
             _warn_if_no_in_review(config)
+            _note_unresolved_fields(config)
             return 0
 
         if args.command == "discover":
@@ -307,9 +320,12 @@ def main(argv=None):
             print("wrote {}".format(CONFIG_PATH))
             if _fail_if_required_status_missing(config):
                 return 3
+            if _fail_if_no_status_is_gated(config):
+                return 5
             if _fail_if_transition_map_incomplete(config):
                 return 4
             _warn_if_no_in_review(config)
+            _note_unresolved_fields(config)
             return 0
 
         config = read_config(CONFIG_PATH)
@@ -391,16 +407,71 @@ def _fail_if_transition_map_incomplete(config):
     return True
 
 
+def _fail_if_no_status_is_gated(config):
+    """Hard precondition: at least one status must actually be gated.
+
+    Returns True when setup should abort. On a board whose columns are e.g.
+    To Do / In Progress / Complete, no PREFERRED_GATED name exists, so `gated`
+    computes to [] -- and then missingGatedTransitions is vacuously [] too, so
+    the exit-4 precondition passes and setup reports success. The result is a
+    verification guardrail that gates nothing at all while looking installed:
+    exactly the "worse than none" case the discover comment calls out, but
+    total rather than partial. Loud here, or invisible forever.
+    """
+    if _as_list(config.get("gatedStatuses")):
+        return False
+    print(
+        "\nERROR: no status on project {} is gated, so the verification gate would\n"
+        "gate nothing at all -- every transition, including into the board's final\n"
+        "column, would be allowed with no sentinel while the hook looks installed.\n"
+        "The gate needs one of: {}.\n"
+        "Statuses found: {}\n\n"
+        "Fix it, then re-run this command:\n"
+        "  1. Open the board > Board settings > Columns\n"
+        "  2. Rename/add a column so one of {} exists (a 'Complete' column is\n"
+        "     usually just 'Done' under another name)\n"
+        "  3. python3 scripts/jira_bootstrap.py discover --key {}\n".format(
+            config.get("projectKey", "?"), ", ".join(PREFERRED_GATED),
+            ", ".join(sorted(_as_dict(config.get("statuses")))) or "(none)",
+            ", ".join(PREFERRED_GATED), config.get("projectKey", "AGENT")),
+        file=sys.stderr)
+    return True
+
+
+def _note_unresolved_fields(config):
+    """Advisory: a FIELD_ALIASES entry that resolved to no custom field.
+
+    Not fatal -- only `flagged` has an unconditional reader (the blocker
+    protocol), and a run can proceed without flagging. But the reader does not
+    check first, so an unresolved alias must not be discovered as silence.
+    """
+    unresolved = _as_list(config.get("unresolvedFields"))
+    if not unresolved:
+        return
+    print(
+        "\nNOTE: these fields could not be resolved on this site: {}.\n"
+        "Readers use them unconditionally -- config.fields.flagged is what the\n"
+        "blocker protocol sets to raise an impediment -- so a missing one fails\n"
+        "at use, not here. Expected Jira field names: {}.\n"
+        "Add or rename the field on the site, then re-run discover.\n".format(
+            ", ".join(unresolved),
+            ", ".join("{} -> '{}'".format(a, FIELD_ALIASES[a]) for a in unresolved)),
+        file=sys.stderr)
+
+
 def _warn_if_no_in_review(config):
     if "In Review" in _as_dict(config.get("statuses")):
         return
     print(
-        "\nNOTE: the project has no 'In Review' status, so only 'Done' is gated.\n"
-        "Adding it needs a board edit the API cannot reliably perform on a\n"
-        "team-managed project. One-time, ~30 seconds:\n"
+        "\nNOTE: the project has no 'In Review' status, so the gated statuses are\n"
+        "just: {}.\n"
+        "Adding it needs a board edit this script cannot perform -- the API does\n"
+        "not reliably create statuses on a team-managed project, so do it by hand.\n"
+        "One-time, ~30 seconds:\n"
         "  1. Open the board > Board settings (or the '...' menu) > Columns\n"
         "  2. Add a column named 'In Review' between 'In Progress' and 'Done'\n"
         "  3. Re-run: python3 scripts/jira_bootstrap.py discover --key {}\n".format(
+            ", ".join(_as_list(config.get("gatedStatuses"))) or "(none)",
             config.get("projectKey", "AGENT")),
         file=sys.stderr)
 

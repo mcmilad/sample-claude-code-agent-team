@@ -343,6 +343,127 @@ def test_main_exits_with_4_when_gated_transitions_incomplete(monkeypatch, tmp_pa
     assert "Done" in capsys.readouterr().err
 
 
+def test_discover_ids_reports_an_empty_gate_set():
+    """A board whose columns are To Do / In Progress / Complete yields gated ==
+    [], and then missingGatedTransitions == [] too -- so every existing
+    precondition passes while the verification guardrail gates nothing at all.
+    That has to be visible in the config and fatal at setup."""
+    a = admin({
+        "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
+        "GET /rest/api/3/project/AGENT/statuses": [
+            {"name": "Task", "statuses": [
+                {"id": "10000", "name": "To Do"},
+                {"id": "10001", "name": "In Progress"},
+                {"id": "10002", "name": "Complete"},
+            ]}],
+        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
+        "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
+    })
+    cfg = a.discover_ids("AGENT")
+    assert cfg["gatedStatuses"] == []
+    assert cfg["missingGatedTransitions"] == [], \
+        "nothing is missing when nothing is gated -- which is the trap"
+
+
+def test_main_exits_with_5_when_no_status_is_gated(monkeypatch, tmp_path, capsys):
+    """Distinct from missing-'To Do' (3), the incomplete map (4) and HTTP (2)."""
+    monkeypatch.setenv("JIRA_SITE", "example.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "me@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "tok")
+    monkeypatch.setattr(jira_bootstrap, "CONFIG_PATH", str(tmp_path / "jira-config.json"))
+    monkeypatch.setattr(
+        jira_bootstrap.JiraAdmin, "discover_ids",
+        lambda self, key, **kwargs: {"projectKey": key,
+                                     "statuses": {"To Do": "1", "Complete": "2"},
+                                     "missingRequiredStatus": None,
+                                     "gatedStatuses": [],
+                                     "transitions": {"11": "To Do"},
+                                     "missingGatedTransitions": []},
+    )
+    code = jira_bootstrap.main(["discover", "--key", "AGENT"])
+    assert code == 5
+    err = capsys.readouterr().err
+    assert "no status" in err.lower() and "gated" in err.lower()
+
+
+def test_ensure_project_also_exits_with_5_when_no_status_is_gated(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("JIRA_SITE", "example.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "me@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "tok")
+    monkeypatch.setattr(jira_bootstrap, "CONFIG_PATH", str(tmp_path / "jira-config.json"))
+    monkeypatch.setattr(jira_bootstrap.JiraAdmin, "ensure_project",
+                        lambda self, key, name: {"key": key, "id": "10001"})
+    monkeypatch.setattr(
+        jira_bootstrap.JiraAdmin, "discover_ids",
+        lambda self, key, **kwargs: {"projectKey": key,
+                                     "statuses": {"To Do": "1", "Complete": "2"},
+                                     "missingRequiredStatus": None,
+                                     "gatedStatuses": [],
+                                     "transitions": {"11": "To Do"},
+                                     "missingGatedTransitions": []},
+    )
+    assert jira_bootstrap.main(["ensure-project", "--key", "AGENT"]) == 5
+
+
+def test_discover_ids_reports_unresolved_field_aliases():
+    """fields.flagged is written only when a field named exactly 'Flagged'
+    exists, but the blocker protocol reads it unconditionally. An unresolved
+    alias must be surfaced, not discovered as silence."""
+    a = admin({
+        "GET /rest/api/3/field": [
+            {"id": "customfield_10020", "name": "Sprint"},
+            {"id": "customfield_10019", "name": "Rank"},
+        ],
+        "GET /rest/api/3/project/AGENT/statuses": [
+            {"name": "Task", "statuses": [
+                {"id": "10000", "name": "To Do"},
+                {"id": "10002", "name": "Done"},
+            ]}],
+        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/agile/1.0/board": {"values": [{"id": 1, "location": {"projectKey": "AGENT"}}]},
+        "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
+    })
+    cfg = a.discover_ids("AGENT")
+    assert cfg["unresolvedFields"] == ["flagged"]
+
+
+def test_discover_ids_reports_no_unresolved_fields_when_all_resolve():
+    a = admin({
+        "GET /rest/api/3/field": [
+            {"id": "customfield_10020", "name": "Sprint"},
+            {"id": "customfield_10019", "name": "Rank"},
+            {"id": "customfield_10021", "name": "Flagged"},
+        ],
+        "GET /rest/api/3/project/AGENT/statuses": [
+            {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
+        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/agile/1.0/board": {"values": []},
+        "GET /_edge/tenant_info": {"cloudId": A_CLOUD_ID},
+    })
+    assert a.discover_ids("AGENT")["unresolvedFields"] == []
+
+
+def test_main_notes_unresolved_field_aliases_without_failing(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("JIRA_SITE", "example.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "me@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "tok")
+    monkeypatch.setattr(jira_bootstrap, "CONFIG_PATH", str(tmp_path / "jira-config.json"))
+    monkeypatch.setattr(
+        jira_bootstrap.JiraAdmin, "discover_ids",
+        lambda self, key, **kwargs: {"projectKey": key,
+                                     "statuses": {"To Do": "1", "In Review": "2", "Done": "3"},
+                                     "missingRequiredStatus": None,
+                                     "gatedStatuses": ["In Review", "Done"],
+                                     "transitions": {"31": "In Review", "41": "Done"},
+                                     "missingGatedTransitions": [],
+                                     "unresolvedFields": ["flagged"]},
+    )
+    assert jira_bootstrap.main(["discover", "--key", "AGENT"]) == 0
+    err = capsys.readouterr().err
+    assert "NOTE:" in err and "flagged" in err
+
+
 def test_open_sprint_creates_then_starts():
     a = admin({
         "POST /rest/agile/1.0/sprint": {"id": 42, "name": "Group 1"},

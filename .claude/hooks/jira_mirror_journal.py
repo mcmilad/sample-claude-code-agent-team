@@ -14,7 +14,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from team_hook_common import read_payload, allow, audit  # noqa: E402
+from team_hook_common import read_payload, allow, audit, as_dict  # noqa: E402
 import jira_mirror  # noqa: E402
 
 EVENT = "PostToolUse"
@@ -34,9 +34,30 @@ def _succeeded(response):
 
 
 def _labels_from_create(tool_input):
-    extra = tool_input.get("additional_fields") or {}
-    labels = extra.get("labels")
+    # as_dict, not `or {}`: additional_fields commonly arrives as a JSON string,
+    # on which .get() raises. The outer handler would then fail open and journal
+    # NOTHING -- and since only a create event ever writes status 'To Do', that
+    # issue would stay invisible to the idle work-check forever, even after
+    # later edits restore its labels. Unreadable labels lose the labels, not the
+    # create event.
+    labels = as_dict(tool_input.get("additional_fields")).get("labels")
     return labels if isinstance(labels, list) else None
+
+
+def _created_key(response):
+    """Extract the new issue key from a create response.
+
+    The exact shape is not contractual: the harness may hand back the raw MCP
+    result or a wrapper around it. Guessing wrong is silent -- _succeeded still
+    says True, the key is None, nothing is journalled, and the idle check nudges
+    nobody while the hook looks correctly installed. So accept the shapes we
+    know about and make the miss loud in the audit log.
+    """
+    r = as_dict(response)
+    for candidate in (r.get("key"), as_dict(r.get("issue")).get("key"), r.get("id")):
+        if candidate:
+            return str(candidate)
+    return None
 
 
 def main():
@@ -59,10 +80,15 @@ def main():
     if tool == CREATE:
         if (tool_input.get("projectKey") or "") != project:
             allow(EVENT, p, reason="create targets another project -- ignored")
-        response = p.get("tool_response") or {}
-        key = response.get("key") if isinstance(response, dict) else None
+        key = _created_key(p.get("tool_response"))
         if not key:
-            allow(EVENT, p, reason="create response carried no issue key")
+            # Distinguishable on purpose: this is the diagnosable signature of a
+            # journaller that is installed but blind, and it is only ever
+            # visible in ~/.claude/logs/team-hooks.jsonl.
+            allow(EVENT, p, reason=(
+                "create succeeded but no issue key could be extracted -- "
+                "unrecognized create response shape (keys: {})".format(
+                    ",".join(sorted(as_dict(p.get("tool_response")))) or "none")))
         event.update({
             "op": "create",
             "key": key,

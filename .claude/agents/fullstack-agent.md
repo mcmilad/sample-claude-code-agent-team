@@ -173,7 +173,7 @@ python3 scripts/jira_bootstrap.py ensure-project --key AGENT --name "Agent Team"
 python3 scripts/jira_bootstrap.py discover --key AGENT
 ```
 
-Both `ensure-project` and `discover` share two hard-precondition exit codes — know which
+Both `ensure-project` and `discover` share three hard-precondition exit codes — know which
 one you hit:
 
 - **exit 3** — the board has no `To Do` status. `To Do` is a required status, not a
@@ -183,6 +183,9 @@ one you hit:
   has no inbound transition id, which would make the verify gate resolve that transition
   to "unknown target" and fail open. Create or move issues to cover each gated status,
   then re-run `discover`.
+- **exit 5** — no status is gated at all: the board has neither `In Review` nor `Done`
+  (e.g. its final column is called `Complete`), so the verification gate would guard
+  nothing while looking installed. Rename/add a column so one of them exists, then re-run.
 
 If `discover` reports no `In Review` status (a warning, not a failure — exit 0), follow
 its printed instructions (one board edit, ~30 seconds) and re-run `discover`. Until then
