@@ -23,10 +23,6 @@ fail open.
 import json
 import os
 
-HOME = os.path.expanduser("~")
-LOG_DIR = os.path.join(HOME, ".claude", "logs")
-MIRROR_DIR = os.path.join(LOG_DIR, "jira-mirror")
-
 # .claude/hooks/jira_mirror.py -> repo root
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_CONFIG_PATH = os.path.join(_REPO, ".claude", "jira-config.json")
@@ -36,24 +32,41 @@ _MERGEABLE = ("summary", "labels", "status")
 
 
 def load_config(path=None):
-    """Read .claude/jira-config.json. Returns {} if missing or unparseable."""
+    """Read the Jira config. Returns {} if missing or unparseable.
+
+    Resolution order: explicit path, then $JIRA_CONFIG_PATH (used by tests and
+    by installs that keep config outside the repo), then the repo default.
+    """
+    candidate = path or os.environ.get("JIRA_CONFIG_PATH") or DEFAULT_CONFIG_PATH
     try:
-        with open(path or DEFAULT_CONFIG_PATH) as fh:
+        with open(candidate) as fh:
             cfg = json.load(fh)
         return cfg if isinstance(cfg, dict) else {}
     except Exception:
         return {}
 
 
+def _log_dir():
+    return os.path.join(os.path.expanduser("~"), ".claude", "logs")
+
+
+def _mirror_dir():
+    return MIRROR_DIR if MIRROR_DIR is not None else os.path.join(_log_dir(), "jira-mirror")
+
+
+# Tests monkeypatch this to redirect the journal; None means "derive from $HOME".
+MIRROR_DIR = None
+
+
 def mirror_path(project_key):
     safe = "".join(c for c in str(project_key) if c.isalnum() or c in "._-") or "_"
-    return os.path.join(MIRROR_DIR, safe + ".jsonl")
+    return os.path.join(_mirror_dir(), safe + ".jsonl")
 
 
 def append_event(project_key, event):
     """Append one observed mutation. Never raises -- journalling must not break a hook."""
     try:
-        os.makedirs(MIRROR_DIR, exist_ok=True)
+        os.makedirs(_mirror_dir(), exist_ok=True)
         with open(mirror_path(project_key), "a") as fh:
             fh.write(json.dumps(event) + "\n")
     except Exception:
