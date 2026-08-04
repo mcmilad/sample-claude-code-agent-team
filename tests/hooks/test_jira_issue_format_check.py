@@ -124,6 +124,22 @@ def test_stringified_additional_fields_is_treated_as_no_labels(tmp_path):
     assert "role-" in proc.stderr
 
 
+def test_stringified_additional_fields_names_the_field_in_the_block_message(tmp_path):
+    """A JSON-string additional_fields yields no labels, so the generic
+    'no role-* label' / 'no spec-* label' problems fire -- but that message
+    reads as if no labels were passed at all, when in fact labels were passed
+    in the wrong shape (a string instead of an object). A model reading only
+    'no role-* label' has every reason to retry the identical string shape.
+    The block message must name additional_fields and say it must be a JSON
+    object, not a string.
+    """
+    proc = run_hook(well_formed(additional_fields='{"labels": ["role-coding"]}'), tmp_path)
+    assert proc.returncode == 2
+    assert "additional_fields" in proc.stderr
+    assert "object" in proc.stderr.lower()
+    assert "string" in proc.stderr.lower()
+
+
 def test_stringified_additional_fields_cannot_smuggle_a_bypass_label(tmp_path):
     proc = run_hook(well_formed(
         summary="no tag here",

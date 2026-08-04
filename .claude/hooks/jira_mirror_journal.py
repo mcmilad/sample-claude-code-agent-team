@@ -52,11 +52,23 @@ def _created_key(response):
     says True, the key is None, nothing is journalled, and the idle check nudges
     nobody while the hook looks correctly installed. So accept the shapes we
     know about and make the miss loud in the audit log.
+
+    The `id` arm is a last resort and only accepted when it is key-shaped
+    (contains a '-', e.g. "AGENT-14"). A bare numeric id (the Jira REST
+    internal id, e.g. "10042") is NOT an issue key: every later event for the
+    issue is addressed by tool_input.issueIdOrKey using the real key, so
+    journalling under the numeric id would fork off a second mirror entry
+    that stays 'To Do' forever and is unfetchable by any agent -- a phantom
+    claimable issue that survives the idle-check's loop guard because it
+    never changes state. Reject it the same way as no key at all.
     """
     r = as_dict(response)
-    for candidate in (r.get("key"), as_dict(r.get("issue")).get("key"), r.get("id")):
+    for candidate in (r.get("key"), as_dict(r.get("issue")).get("key")):
         if candidate:
             return str(candidate)
+    raw_id = r.get("id")
+    if raw_id and "-" in str(raw_id):
+        return str(raw_id)
     return None
 
 

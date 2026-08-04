@@ -102,7 +102,25 @@ def test_accepts_a_wrapped_issue_key_in_the_response(tmp_path, monkeypatch):
     assert read_journal(home)[0]["key"] == "AGENT-14"
 
 
-def test_accepts_a_top_level_id_when_no_key_is_present(tmp_path, monkeypatch):
+def test_accepts_a_key_shaped_top_level_id_when_no_key_field_is_present(tmp_path, monkeypatch):
+    write_config(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    run_hook({
+        "tool_name": TOOL + "createJiraIssue",
+        "tool_input": {"projectKey": "AGENT", "summary": "[coding] impl login"},
+        "tool_response": {"id": "AGENT-14"},
+    }, home)
+    assert read_journal(home)[0]["key"] == "AGENT-14"
+
+
+def test_rejects_a_purely_numeric_top_level_id(tmp_path, monkeypatch):
+    """A bare numeric `id` (e.g. the Jira REST numeric issue id, "10042") is not
+    an issue key. Every later event for the issue is keyed by the real key
+    (e.g. "AGENT-14") via issueIdOrKey, so journalling under the numeric id
+    would create a second, permanently-'To Do' mirror entry that no agent can
+    ever fetch or transition -- a phantom claimable issue. Treat a numeric-only
+    id as no key found rather than accepting it.
+    """
     write_config(tmp_path, monkeypatch)
     home = tmp_path / "home"
     run_hook({
@@ -110,7 +128,9 @@ def test_accepts_a_top_level_id_when_no_key_is_present(tmp_path, monkeypatch):
         "tool_input": {"projectKey": "AGENT", "summary": "[coding] impl login"},
         "tool_response": {"id": "10042"},
     }, home)
-    assert read_journal(home)[0]["key"] == "10042"
+    assert read_journal(home) == []
+    reasons = [r.get("reason", "") for r in read_audit(home)]
+    assert any("unrecognized create response shape" in r for r in reasons), reasons
 
 
 def test_unextractable_create_key_is_distinguishable_in_the_audit_log(tmp_path, monkeypatch):

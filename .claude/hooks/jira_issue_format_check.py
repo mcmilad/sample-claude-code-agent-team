@@ -53,7 +53,12 @@ def main():
     # `or {}` lets that through and .get() raises, the outer handler fails open,
     # and a role-tagless, section-less, label-less issue is created unchecked.
     # Unreadable labels are treated as no labels -- including bypass labels.
-    labels = (as_dict(tool_input.get("additional_fields")).get("labels")) or []
+    raw_additional_fields = tool_input.get("additional_fields")
+    additional_fields_unreadable = (
+        raw_additional_fields is not None
+        and not isinstance(raw_additional_fields, dict)
+    )
+    labels = (as_dict(raw_additional_fields).get("labels")) or []
     labels = [str(x) for x in labels] if isinstance(labels, list) else []
     if "skip-format-check" in labels:
         allow(EVENT, p, reason="bypass label present")
@@ -63,6 +68,20 @@ def main():
     description = description if isinstance(description, str) else ""
 
     problems = []
+
+    if additional_fields_unreadable:
+        # Distinct from "no role-* label" / "no spec-* label": those read as
+        # if no labels were supplied at all, when the real defect is that
+        # additional_fields arrived as a JSON string rather than an object,
+        # so as_dict() correctly yielded no labels out of it. Without naming
+        # the field and its shape, a model sees only the label complaints and
+        # has every reason to retry with the identical string.
+        problems.append(
+            "additional_fields was a {} (\"{}\"), not a JSON object -- it must be "
+            "a JSON object (e.g. {{\"labels\": [...]}}), not a JSON-encoded "
+            "string; as a result no labels could be read from it".format(
+                type(raw_additional_fields).__name__, raw_additional_fields)
+        )
 
     tag_match = SUMMARY_TAG.match(summary)
     if not tag_match:
