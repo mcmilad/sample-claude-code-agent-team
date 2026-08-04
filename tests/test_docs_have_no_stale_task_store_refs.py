@@ -27,6 +27,7 @@ MIGRATED = [
     ".claude/agents/devops-agent.md",
     ".claude/agents/review-agent.md",
     ".claude/agents/sa-agent.md",
+    ".claude/agents/fullstack-agent.md",
 ]
 
 TEAMMATES = [
@@ -57,3 +58,17 @@ def test_every_teammate_requires_the_jira_workflow_skill():
         with open(os.path.join(REPO, rel)) as fh:
             assert "jira-workflow" in fh.read(), \
                 "{} must load jira-workflow before claiming work".format(rel)
+
+
+def test_lead_documents_the_bootstrap_and_sprint_lifecycle():
+    with open(os.path.join(REPO, ".claude", "agents", "fullstack-agent.md")) as fh:
+        text = fh.read()
+    for token in ("jira_bootstrap.py", "sprint-open", "sprint-close", "jira-run.json"):
+        assert token in text, "lead must document " + token
+
+
+def test_lead_forbids_handing_the_admin_token_to_teammates():
+    with open(os.path.join(REPO, ".claude", "agents", "fullstack-agent.md")) as fh:
+        text = fh.read()
+    assert "JIRA_API_TOKEN" in text
+    assert "never" in text.lower()
