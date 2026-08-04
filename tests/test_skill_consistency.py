@@ -51,3 +51,97 @@ def test_skill_sentinel_path_matches_the_gate_hook():
     text = read(SKILL)
     assert "~/.claude/logs/verified/" in text
     assert ".verified" in text
+
+
+# --- Reverse-direction checks -----------------------------------------------
+#
+# The tests above only catch under-claiming: "the hook requires X, does the
+# skill mention X?" They cannot catch a skill that claims a section or a label
+# is machine-enforced when no hook actually checks it -- an over-claim that
+# reads as a guardrail but is not one. That is precisely the failure class a
+# prior review caught in the Closing section ("An implementer cannot close its
+# own issue", stated in the document's enforced-fact register, when nothing in
+# jira_transition_verify_gate.py checks who is transitioning). These tests
+# assert the reverse direction: everything the skill's structured blocks (the
+# Issue Shape code block, the Label Vocabulary table's "Yes" rows) present as
+# required/enforced must actually appear in the hook source as a real check.
+#
+# Anchored to those structured blocks rather than a whole-file scan, so
+# unrelated substrings -- e.g. "spec-" inside "spec-workflow" -- can't
+# false-positive a match.
+
+def _issue_shape_description_sections(text):
+    """Section labels indented two spaces under `Description:` in the Issue
+    Shape code block -- these are the ones the skill presents as required
+    sub-fields, as distinct from top-level issue metadata like Summary:/Labels:.
+    """
+    block = re.search(r"## Issue Shape\n.*?```\n(.*?)```", text, re.S).group(1)
+    return set(re.findall(r"^  ([A-Z][a-zA-Z]*:)", block, re.M))
+
+
+def _split_table_row(row):
+    """Split a markdown table row into cells, respecting `\\|`-escaped pipes
+    inside a cell (used by the role-* alternatives cell) as literal characters
+    rather than column separators.
+    """
+    protected = row.strip().strip("|").replace(r"\|", "\x00")
+    return [c.strip().replace("\x00", "|") for c in protected.split("|")]
+
+
+def _label_vocabulary_rows(text):
+    section = re.search(r"## Label Vocabulary\n\n(.*?)\n\n", text, re.S).group(1)
+    lines = [ln for ln in section.splitlines() if ln.startswith("|")]
+    return [_split_table_row(ln) for ln in lines[2:]]  # skip header + separator
+
+
+def _label_token(label):
+    """Reduce a concrete label like "role-coding" or "spec-<slug>" (the latter
+    already truncated to "spec-" by the backtick-token regex, which stops at
+    the first non [a-z-] character) to the prefix a hook check would test:
+    "role-coding" -> "role-", "spec-" -> "spec-", "skip-verify" -> "skip-verify"
+    (skip-* labels are matched as exact literals by the hooks, not prefixes).
+    """
+    if label.startswith("skip-"):
+        return label
+    base = label.rstrip("-")
+    if "-" in base:
+        return base.rsplit("-", 1)[0] + "-"
+    return base + "-"
+
+
+def _hook_enforced_label_tokens():
+    fmt, gate = read(FORMAT_HOOK), read(GATE_HOOK)
+    tokens = set(re.findall(r'startswith\("([a-z]+-)"\)', fmt))
+    tokens.update(re.findall(r'"(skip-[a-z-]+)"', fmt + gate))
+    return tokens
+
+
+def test_skill_issue_shape_required_sections_are_all_hook_enforced():
+    """Reverse of test_skill_required_sections_match_the_format_hook: every
+    section the Issue Shape block presents as required must be one the format
+    hook's REQUIRED_SECTIONS actually checks.
+    """
+    text = read(SKILL)
+    required = re.search(r"REQUIRED_SECTIONS = \(([^)]*)\)", read(FORMAT_HOOK)).group(1)
+    hook_sections = set(re.findall(r'"([^"]+)"', required))
+    for section in _issue_shape_description_sections(text):
+        assert section in hook_sections, \
+            "skill's Issue Shape claims {} is required but the hook does not check it".format(section)
+
+
+def test_skill_label_vocabulary_enforced_labels_are_all_hook_checked():
+    """Reverse of test_skill_documents_the_labels_the_hook_enforces: a label
+    the Label Vocabulary table marks "Hook-enforced? Yes" must correspond to
+    an actual check in one of the shipped hooks -- catching the over-claim
+    class of bug (a label presented as guarded when it is convention only).
+    """
+    text = read(SKILL)
+    hook_tokens = _hook_enforced_label_tokens()
+    for cells in _label_vocabulary_rows(text):
+        label_cell, _meaning, enforced_cell = cells
+        if not enforced_cell.lower().startswith("yes"):
+            continue
+        for label in re.findall(r"`([a-z][a-z-]*)", label_cell):
+            token = _label_token(label)
+            assert token in hook_tokens, \
+                "skill marks {} (label {}) as hook-enforced but no hook checks it".format(token, label)

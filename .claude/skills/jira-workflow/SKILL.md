@@ -126,19 +126,25 @@ Then `SendMessage` the lead. Clear the flag by setting the field to `null` when 
 
 ## Closing
 
-An implementer **cannot close its own issue**. Transition to `In Review` and stop there.
-Only the review synthesizer moves `In Review` -> `Done`, and only on a PASS verdict.
+An implementer must **not** close its own issue: transition to `In Review` and stop
+there. Only the review synthesizer moves `In Review` -> `Done`, and only on a PASS
+verdict.
+
+**Not enforced.** The gate hook checks only that a sentinel exists — not who is
+transitioning, nor what the prior status was. This is a protocol convention, not a
+guardrail: an agent that writes a second sentinel can self-close. Treat a `Done`
+transition with no synthesizer verdict comment as a review-gate violation.
 
 ## Label Vocabulary
 
-| Label | Meaning |
-|---|---|
-| `spec-<slug>` | Which spec this belongs to |
-| `role-coding` \| `role-devops` \| `role-sa` \| `role-review` | Which pool may claim it |
-| `agent-<instance>` | Who claimed it — drives board swimlanes |
-| `group-<n>` | Which parallel group; survives sprint closure |
-| `skip-format-check` | Exempt from the create-time shape check |
-| `skip-verify` | Exempt from the sentinel gate |
+| Label | Meaning | Hook-enforced? |
+|---|---|---|
+| `spec-<slug>` | Which spec this belongs to | Yes |
+| `role-coding` \| `role-devops` \| `role-sa` \| `role-review` | Which pool may claim it | Yes |
+| `agent-<instance>` | Who claimed it — drives board swimlanes | No (convention only) |
+| `group-<n>` | Which parallel group; survives sprint closure | No (convention only) |
+| `skip-format-check` | Exempt from the create-time shape check | Yes |
+| `skip-verify` | Exempt from the sentinel gate | Yes |
 
 ## When Jira Is Unreachable
 
