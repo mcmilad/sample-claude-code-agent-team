@@ -276,6 +276,23 @@ def test_discover_ids_keeps_existing_cloud_id_when_tenant_info_is_empty():
     assert cfg["cloudId"] == "previously-known-id"
 
 
+def test_discover_ids_keeps_existing_cloud_id_when_tenant_info_is_a_truthy_non_dict():
+    """`x or {}` only guards *falsy* x -- a truthy non-dict (a JSON array, a
+    bare string, exactly what a maintenance-mode or proxy error body often is)
+    passes through unchanged and crashes on the next .get() unless the guard
+    checks type, not just truthiness. Must fall back, not raise."""
+    a = admin({
+        "GET /rest/api/3/field": [{"id": "customfield_10020", "name": "Sprint"}],
+        "GET /rest/api/3/project/AGENT/statuses": [
+            {"name": "Task", "statuses": [{"id": "10000", "name": "To Do"}]}],
+        "GET /rest/api/3/search": {"issues": []},
+        "GET /rest/agile/1.0/board": {"values": []},
+        "GET /_edge/tenant_info": ["unexpected"],
+    })
+    cfg = a.discover_ids("AGENT", existing_cloud_id="previously-known-id")
+    assert cfg["cloudId"] == "previously-known-id"
+
+
 def test_discover_ids_keeps_existing_cloud_id_when_tenant_info_lookup_fails():
     """A cloud-id lookup failure (network error) must not abort setup -- unlike
     the To Do and gated-transition preconditions, this one is recoverable: the

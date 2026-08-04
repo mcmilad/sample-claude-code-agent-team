@@ -52,6 +52,25 @@ PREFERRED_GATED = ("In Review", "Done")
 REQUIRED_STATUS = "To Do"
 
 
+def _as_dict(value):
+    """Coalesce a value to a dict before .get()/`in`, guarding on *type* rather
+    than truthiness.
+
+    `value or {}` only guards falsy values (None, {}, [], ""). A truthy
+    non-dict -- a JSON array, a bare string, a number, exactly what a
+    maintenance-mode or proxy error body often is -- passes through unchanged
+    and crashes on the next .get(). Every value here originates from a
+    parsed HTTP response body (or a config dict built from one), so the type
+    is never guaranteed.
+    """
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value):
+    """Same idea as _as_dict, for list-shaped values."""
+    return value if isinstance(value, list) else []
+
+
 def _http(method, url, body, headers):
     """Default transport. Tests replace JiraAdmin.transport with a stub."""
     data = body.encode() if isinstance(body, str) else body
@@ -133,19 +152,19 @@ class JiraAdmin:
                 project_key))
         representative_by_status = {}
         for issue in probe.get("issues", []):
-            status_name = ((issue.get("fields") or {}).get("status") or {}).get("name")
+            status_name = _as_dict(_as_dict(issue.get("fields")).get("status")).get("name")
             if status_name and status_name not in representative_by_status:
                 representative_by_status[status_name] = issue["key"]
         for key in representative_by_status.values():
             for t in self.request(
                     "GET", "/rest/api/3/issue/{}/transitions".format(key)).get("transitions", []):
-                target = (t.get("to") or {}).get("name")
+                target = _as_dict(t.get("to")).get("name")
                 if target:
                     transitions[str(t["id"])] = target
 
         board_id = None
         for board in self.request("GET", "/rest/agile/1.0/board").get("values", []):
-            if (board.get("location") or {}).get("projectKey") == project_key:
+            if _as_dict(board.get("location")).get("projectKey") == project_key:
                 board_id = board.get("id")
                 break
 
@@ -178,7 +197,7 @@ class JiraAdmin:
             tenant_info = self.request("GET", "/_edge/tenant_info")
         except (urllib.error.URLError, ValueError):
             tenant_info = {}
-        discovered_cloud_id = (tenant_info or {}).get("cloudId")
+        discovered_cloud_id = _as_dict(tenant_info).get("cloudId")
         if discovered_cloud_id:
             cloud_id = discovered_cloud_id
 
@@ -338,7 +357,7 @@ def _fail_if_required_status_missing(config):
         "  2. Rename the first column to exactly 'To Do' (or add one)\n"
         "  3. python3 scripts/jira_bootstrap.py discover --key {}\n".format(
             config.get("projectKey", "?"), missing,
-            ", ".join(sorted(config.get("statuses") or {})) or "(none)",
+            ", ".join(sorted(_as_dict(config.get("statuses")))) or "(none)",
             config.get("projectKey", "AGENT")),
         file=sys.stderr)
     return True
@@ -356,7 +375,7 @@ def _fail_if_transition_map_incomplete(config):
     very first `discover` call. That is intended: create issues covering each
     gated status, then re-run.
     """
-    missing = config.get("missingGatedTransitions") or []
+    missing = _as_list(config.get("missingGatedTransitions"))
     if not missing:
         return False
     print(
@@ -373,7 +392,7 @@ def _fail_if_transition_map_incomplete(config):
 
 
 def _warn_if_no_in_review(config):
-    if "In Review" in (config.get("statuses") or {}):
+    if "In Review" in _as_dict(config.get("statuses")):
         return
     print(
         "\nNOTE: the project has no 'In Review' status, so only 'Done' is gated.\n"
