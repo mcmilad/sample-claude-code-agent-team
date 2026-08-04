@@ -149,6 +149,108 @@ def test_unextractable_create_key_is_distinguishable_in_the_audit_log(tmp_path, 
     assert any("unrecognized create response shape" in r for r in reasons), reasons
 
 
+def test_records_created_issue_from_real_content_block_response(tmp_path, monkeypatch):
+    """Live capture from a real createJiraIssue call: the harness delivers
+    tool_response as a list of content blocks -- each a dict with `type` and
+    `text`, where `text` is the issue JSON serialized as a *string* -- not
+    the bare issue dict `_created_key` used to assume. Reproduced against the
+    shipped (buggy) hook: exit 0, no journal file written, audit reason
+    "unrecognized create response shape (keys: none)". This is the ground
+    truth payload from that live capture, copied verbatim.
+    """
+    write_config(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    proc = run_hook({
+        "tool_name": TOOL + "createJiraIssue",
+        "tool_input": {
+            "projectKey": "AGENT",
+            "summary": "[coding] impl login",
+            "additional_fields": {"labels": ["role-coding", "spec-auth"]},
+        },
+        "tool_response": [
+            {"type": "text",
+             "text": "{\n  \"id\": \"10074\",\n  \"key\": \"AGENT-1\",\n  "
+                      "\"self\": \"https://api.atlassian.com/ex/jira/.../issue/10074\"\n}"}
+        ],
+    }, home)
+    assert proc.returncode == 0
+    events = read_journal(home)
+    assert len(events) == 1
+    assert events[0]["key"] == "AGENT-1"
+    assert events[0]["labels"] == ["role-coding", "spec-auth"]
+    assert events[0]["status"] == "To Do"
+
+
+def test_content_block_response_carrying_error_messages_is_not_journalled(tmp_path, monkeypatch):
+    """A content-block list whose text parses to an object carrying
+    errorMessages is a failed call, not a success -- must not be journalled,
+    unlike the old `bool(response)` check which counted any non-empty list
+    as success regardless of content."""
+    write_config(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    proc = run_hook({
+        "tool_name": TOOL + "createJiraIssue",
+        "tool_input": {"projectKey": "AGENT", "summary": "[coding] x"},
+        "tool_response": [
+            {"type": "text",
+             "text": json.dumps({"errorMessages": ["summary is required"], "errors": {}})}
+        ],
+    }, home)
+    assert proc.returncode == 0
+    assert read_journal(home) == []
+
+
+def test_content_block_response_with_invalid_json_text_is_diagnosable(tmp_path, monkeypatch):
+    """A content-block list whose `text` is not valid JSON must journal
+    nothing, exit 0, and still emit the distinguishable unrecognized-shape
+    audit reason -- the same diagnosability the bare-dict case already had."""
+    write_config(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    proc = run_hook({
+        "tool_name": TOOL + "createJiraIssue",
+        "tool_input": {"projectKey": "AGENT", "summary": "[coding] x"},
+        "tool_response": [{"type": "text", "text": "not valid json {{{"}],
+    }, home)
+    assert proc.returncode == 0
+    assert read_journal(home) == []
+    reasons = [r.get("reason", "") for r in read_audit(home)]
+    assert any("unrecognized create response shape" in r for r in reasons), reasons
+
+
+def test_bare_dict_response_still_journals_after_content_block_support_added(tmp_path, monkeypatch):
+    """Backward compatibility: the previously-assumed bare-issue-dict shape
+    must keep working once content-block list support is added."""
+    write_config(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    proc = run_hook({
+        "tool_name": TOOL + "createJiraIssue",
+        "tool_input": {"projectKey": "AGENT", "summary": "[coding] impl signup"},
+        "tool_response": {"key": "AGENT-9"},
+    }, home)
+    assert proc.returncode == 0
+    events = read_journal(home)
+    assert len(events) == 1
+    assert events[0]["key"] == "AGENT-9"
+    assert events[0]["status"] == "To Do"
+
+
+def test_content_block_response_with_only_numeric_id_is_rejected(tmp_path, monkeypatch):
+    """The anti-poisoning guard (reject a bare numeric id, e.g. the Jira REST
+    internal id "10074", as a key) must also hold when the id arrives inside
+    a content-block list rather than a bare dict."""
+    write_config(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    proc = run_hook({
+        "tool_name": TOOL + "createJiraIssue",
+        "tool_input": {"projectKey": "AGENT", "summary": "[coding] x"},
+        "tool_response": [{"type": "text", "text": json.dumps({"id": "10074"})}],
+    }, home)
+    assert proc.returncode == 0
+    assert read_journal(home) == []
+    reasons = [r.get("reason", "") for r in read_audit(home)]
+    assert any("unrecognized create response shape" in r for r in reasons), reasons
+
+
 def test_records_transition_with_resolved_status(tmp_path, monkeypatch):
     cfg = tmp_path / "jira-config.json"
     cfg.write_text(json.dumps({"projectKey": "AGENT", "transitions": {"21": "In Progress"}}))

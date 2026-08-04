@@ -10,6 +10,7 @@ operator's real work) are ignored entirely.
 
 Always exits 0. This hook observes; it never gates.
 """
+import json
 import os
 import sys
 
@@ -25,12 +26,67 @@ EDIT = PREFIX + "editJiraIssue"
 COMMENT = PREFIX + "addCommentToJiraIssue"
 WATCHED = (CREATE, TRANSITION, EDIT, COMMENT)
 
+_ERROR_KEYS = ("error", "errors", "errorMessages")
+
+
+def _parse_content_block_object(response):
+    """Extract the first JSON object embedded in a content-block list.
+
+    The harness does not always hand back the bare MCP result. Live capture
+    from a real createJiraIssue call shows it instead wraps the result as a
+    list of content blocks:
+    `[{"type": "text", "text": "<issue JSON as a string>"}, ...]`.
+    Walk the entries and decode the first dict entry whose `text` is a
+    string that parses to a JSON object.
+
+    Returns None if `response` is not a list, or no block's `text` decodes
+    to an object. None means "could not determine" -- it is NOT proof of
+    failure. Only an explicit error marker inside a successfully decoded
+    object is treated as a failure signal; an undecodable block is a
+    shape-recognition problem for the caller to diagnose, not evidence the
+    call itself failed.
+    """
+    if not isinstance(response, list):
+        return None
+    for block in response:
+        if not isinstance(block, dict):
+            continue
+        text = block.get("text")
+        if not isinstance(text, str):
+            continue
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
 
 def _succeeded(response):
-    """A response carrying an error key is a failed call -- do not journal it."""
-    if not isinstance(response, dict):
-        return bool(response)
-    return not any(k in response for k in ("error", "errors", "errorMessages"))
+    """A response carrying an error key is a failed call -- do not journal it.
+
+    `tool_response` does not always arrive as a bare dict -- see
+    _parse_content_block_object. An empty list carries no evidence of
+    success at all and stays a failure, matching the old `bool(response)`
+    behaviour for falsy values. A non-empty list that decodes to an object
+    is judged the same way a bare dict is: an error key means failure.
+    A non-empty list that does NOT decode to an object is not reported as a
+    failure here -- misreporting an unrecognized-shape success as "the call
+    failed" would bury it under the wrong, non-diagnosable audit reason.
+    Whether a key can be found in it is _created_key's job, and that path
+    logs its own distinguishable reason when it comes up empty.
+    """
+    if isinstance(response, dict):
+        return not any(k in response for k in _ERROR_KEYS)
+    if isinstance(response, list):
+        if not response:
+            return False
+        parsed = _parse_content_block_object(response)
+        if parsed is not None:
+            return not any(k in parsed for k in _ERROR_KEYS)
+        return True
+    return bool(response)
 
 
 def _labels_from_create(tool_input):
@@ -48,10 +104,16 @@ def _created_key(response):
     """Extract the new issue key from a create response.
 
     The exact shape is not contractual: the harness may hand back the raw MCP
-    result or a wrapper around it. Guessing wrong is silent -- _succeeded still
-    says True, the key is None, nothing is journalled, and the idle check nudges
-    nobody while the hook looks correctly installed. So accept the shapes we
-    know about and make the miss loud in the audit log.
+    result, a wrapper around it, or -- confirmed via live capture from a real
+    createJiraIssue call -- a list of content blocks whose `text` is the
+    issue JSON serialized as a string (see _parse_content_block_object).
+    Guessing wrong is silent -- _succeeded still says True, the key is None,
+    nothing is journalled, and the idle check nudges nobody while the hook
+    looks correctly installed. So accept the shapes we know about and make
+    the miss loud in the audit log.
+
+    Bare-dict handling comes first and is untouched: if `response` is
+    already a non-empty dict, the content-block path is never consulted.
 
     The `id` arm is a last resort and only accepted when it is key-shaped
     (contains a '-', e.g. "AGENT-14"). A bare numeric id (the Jira REST
@@ -60,9 +122,15 @@ def _created_key(response):
     journalling under the numeric id would fork off a second mirror entry
     that stays 'To Do' forever and is unfetchable by any agent -- a phantom
     claimable issue that survives the idle-check's loop guard because it
-    never changes state. Reject it the same way as no key at all.
+    never changes state. Reject it the same way as no key at all. This guard
+    applies identically whether the id arrived in a bare dict or was decoded
+    out of a content block.
     """
     r = as_dict(response)
+    if not r:
+        block_obj = _parse_content_block_object(response)
+        if block_obj is not None:
+            r = block_obj
     for candidate in (r.get("key"), as_dict(r.get("issue")).get("key")):
         if candidate:
             return str(candidate)
