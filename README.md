@@ -74,7 +74,7 @@ Keeping the token out of agent hands otherwise rests on **instructions, not enfo
 
 The same applies mid-run: the sprint lifecycle (`sprint-open` / `sprint-close`) needs the admin token too. On the recommended path the lead messages you at each group boundary and **you** run the command in the separate terminal. Letting the lead run it instead is the convenience path, and it costs you the confinement — the token has to be in the session's environment for that to work.
 
-`scripts/jira_bootstrap.py` is the only thing that uses it. `discover` writes the per-site field, status, and transition IDs to `.claude/jira-config.json` (gitignored) so nothing is hardcoded and the same repo works on any site — that config holds no credential, so the agents read it freely.
+`scripts/jira_bootstrap.py` is the only thing that uses it. `discover` writes the per-site field, status, and transition IDs to `.claude/jira-config.json` (gitignored) so nothing is hardcoded and the same repo works on any site — that config holds no credential, so the agents read it freely. Because it's gitignored, cloning this repo does not carry over anyone else's copy: `.claude/jira-config.json` never leaves the machine it was generated on, so every clone needs its own `ensure-project` / `discover` run against its own site before agents can work.
 
 Run bootstrap **in that same separate terminal**, in this order — three steps, not two. The transition-discovery step samples *existing* issues' available transitions, so it is necessarily empty on a brand-new project. Step 2 happens in the Claude Code session; steps 1 and 3 are yours:
 
@@ -98,9 +98,25 @@ Both `ensure-project` and `discover` share three hard-precondition exit codes �
 
 If `discover` reports no `In Review` status, that is a **warning, not a failure — exit 0.** Follow its printed instructions (one board column edit) and re-run `discover`. Until you add it, only `Done` is gated. In practice this warning is uncommon: verified live, a team-managed Scrum project usually ships with `To Do` / `In Progress` / `In Review` / `Done` already present, so the board-column step is often unnecessary. The guidance above remains the correct remedy on a board that genuinely lacks `In Review`.
 
+### Other bootstrap subcommands
+
+Beyond `ensure-project` and `discover` above, `scripts/jira_bootstrap.py` has two more admin-plane commands, also run with the token in the separate terminal:
+
+- `sprint-open --name "<name>" [--days N]` — creates a sprint on the discovered board and activates it, for one parallel work group. `--days` (default `14`) sets the nominal window Jira's API requires to activate a sprint at all; it isn't a real cadence — a "sprint" here can last minutes, and the lead closes it explicitly with `sprint-close --id <id>` once the group finishes.
+- `delete-issues --keys A,B,C [--confirm] [--delete-subtasks]` — deletes specific issues by key (the Atlassian MCP has no delete tool, so this only exists in the admin plane). `--keys` is explicit, comma-separated keys only — no wildcards, no JQL — and the command refuses to touch anything if any key doesn't belong to the configured project. **Omitting `--confirm` is a dry run**: it prints the planned deletion order and deletes nothing. Before deleting anything with `--confirm`, it probes the delete route with a key that can't exist, to confirm the endpoint is live and reachable rather than assume so. Deletion order is leaves-first, so a parent Epic is never removed before its children. Add `--delete-subtasks` only if a delete then fails with a message about subtasks. Intended for cleaning up smoke-test issues, not routine backlog management.
+
 ## Watching a run
 
 Open the project board. Swimlanes group by the `agent-*` label, so each agent has its own lane showing exactly what it is working on. The active sprint is the current parallel group; the backlog holds the groups still to come. A flagged card is blocked, and the comment on it says why.
+
+### Board setup for per-agent visibility (manual, one time)
+
+The swimlane-by-label grouping above, and the quick filter per agent below, are **not** set up by `jira_bootstrap.py` — neither `ensure-project` nor `discover` touches board layout. They're plain Jira board configuration, done once by hand:
+
+1. Board settings > Swimlanes — group by the `agent-*` label pattern (exact option name varies by Jira UI version; look for "Swimlanes based on... Labels" or an equivalent query-based swimlane).
+2. Board settings > Quick Filters — add one filter per agent instance you expect to run, e.g. `labels = agent-coding-2`, so a lane can be isolated on demand.
+
+A freshly bootstrapped project's board has no swimlanes or quick filters until you add them — don't assume bootstrap wired this up.
 
 Useful filters:
 - `project = AGENT AND status = "To Do"` — unclaimed work
@@ -257,7 +273,7 @@ No hook-path edits are needed here: the copied `settings.json` already resolves 
 │   ├── settings.json            # Claude Code settings (env vars, enabled plugins, hook wiring)
 │   └── jira-config.json         # Generated by `scripts/jira_bootstrap.py discover` — gitignored, per-site IDs
 ├── scripts/
-│   └── jira_bootstrap.py        # Admin plane: project creation, ID discovery, sprint lifecycle (needs a Jira API token)
+│   └── jira_bootstrap.py        # Admin plane: project creation, ID discovery, sprint lifecycle, issue deletion (needs a Jira API token)
 ├── commands/                    # Optional slash commands (see Optional Commands section)
 │   ├── brainstorm.md            # `/brainstorm` — structured new-project ideation -> requirements.md
 │   └── optimize-my-claude.md    # `/optimize-my-claude` — audit and tune ~/.claude after model releases
