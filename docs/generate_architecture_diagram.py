@@ -162,7 +162,7 @@ def build():
         title="review-agent", title_size=11.5, title_align="center",
         body="opus · max", body_size=8.8)
 
-    sa_y, sa_h = 38, 14
+    sa_y, sa_h = 42, 10
     box(ax, inner_x, sa_y, inner_w, sa_h, BLUE, dashed=True, lw=1.4,
         title="sa-agent  (optional)", title_size=11, title_align="center",
         body="opus · high", body_size=8.8)
@@ -218,7 +218,7 @@ def build():
              "Commands: /brainstorm, /optimize-my-claude",
         body_size=8.5)
 
-    hooks_y, hooks_h = 10, 42
+    hooks_y, hooks_h = 28, 24
     box(ax, c2_x, hooks_y, c2_w, hooks_h, PURPLE, lw=2.3,
         title="Hooks (fail-open)", title_size=12,
         body="PreToolUse  → createJiraIssue        (format check)\n"
@@ -226,10 +226,7 @@ def build():
              "PostToolUse → Jira mutations          (mirror journal)\n"
              "TeammateIdle                          (work check)",
         body_size=8.8)
-    ax.text(c2_x + c2_w - 2.2, hooks_y + hooks_h - 2.6, "corrected in v2",
-             fontsize=8, ha="right", va="top", color=RED_NOTE, fontweight="bold",
-             style="italic")
-    ax.text(c2_x + 2.2, hooks_y + 8.6,
+    ax.text(c2_x + 2.2, hooks_y + 8.1,
              "All four → ~/.claude/logs/team-hooks.jsonl\n"
              "mirror journal also → ~/.claude/logs/jira-mirror/<project>.jsonl\n"
              "  (TeammateIdle reads that mirror back)",
@@ -273,16 +270,15 @@ def build():
     arrow(ax, (c3_x + c3_w / 2, planes_y + planes_h), (c3_x + c3_w / 2, jira_y),
           color="#2E7D32", lw=1.8)
 
-    art_y, art_h = 10, 36
+    art_y, art_h = 28, 18
     box(ax, c3_x, art_y, c3_w, art_h, GREEN, lw=1.7,
         title="Spec artifacts  (.claude/specs/<slug>/)", title_size=10.3,
         body="spec.md   design.md   decisions.md\n"
              "requirements.md   jira-run.json",
         body_size=8.6)
-    ax.text(c3_x + 2.2, art_y + art_h - 15.2,
-             "tasks.md and review.md are RETIRED\n"
-             "backlog + review verdicts live in Jira,\nnot on disk",
-             fontsize=8.3, ha="left", va="top", color=RED_NOTE, fontweight="bold",
+    ax.text(c3_x + 2.2, art_y + art_h - 11.5,
+             "no backlog file and no review file —\nboth live in Jira",
+             fontsize=8.3, ha="left", va="top", color="#222222",
              linespacing=1.5)
 
     # ======================================================================
