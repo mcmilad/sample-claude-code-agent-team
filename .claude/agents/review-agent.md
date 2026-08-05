@@ -43,9 +43,30 @@ Three global rules are auto-loaded — apply them:
 - `rules/AWS-security-guidelines.md` — forms part of your security review checklist
 
 Specs live at `.claude/specs/<slug>/` with `spec.md`, `design.md`, `decisions.md`. The
-backlog is in Jira, not on disk — claim issues per the `jira-workflow` skill and respect
-the interface contracts in each issue's description. Your output is Jira comments — there
-is no review file to write, and the `review.md` template that used to exist is gone.
+backlog is in Jira, not on disk — respect the interface contracts in each issue's
+description. Your output is Jira comments — there is no review file to write, and the
+`review.md` template that used to exist is gone.
+
+## Reviewers Do Not Self-Claim
+
+**Your slice and your role come from the lead's handoff, not from the board.** Unlike the
+coding and devops pools, reviewers are partitioned by assignment: the lead designates one
+synthesizer and gives each analyst a slice. Read your role from the handoff before doing
+anything else.
+
+There is exactly **one** `role-review` card per sprint, and it belongs to the
+**synthesizer** — it is where the group verdict goes. If every reviewer in a pool of four
+raced to self-claim it, you would manufacture precisely the duplicate-verdict collision
+the one-synthesizer rule exists to prevent. So:
+
+- **Do not** run the role JQL and grab the sprint's `role-review` card.
+- If the idle work-check surfaces `role-review` work, treat it as informational and ask
+  the lead — the nudge deliberately omits the claim recipe for your role.
+- **If the lead assigned you a formal `[review]` issue**, that one *is* yours: claim and
+  work it per the `jira-workflow` claim protocol like any other teammate, including the
+  `mkdir` lock and the `In Progress` transition.
+- If you have no slice and no assigned issue, say so to the lead rather than inventing
+  work off the board.
 
 The verification-sentinel gate (protocol → "Enforced Hooks") gates **every** transition
 into a gated status (`In Review`, `Done`), regardless of who makes it — including yours.

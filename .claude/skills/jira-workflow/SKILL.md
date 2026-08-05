@@ -38,8 +38,23 @@ genuinely has no verification. Epics are exempt.
 
 ## Claim Protocol
 
-Jira has no compare-and-swap, and up to twelve agents claim concurrently. Correctness
-comes from read-after-write with a deterministic tie-break.
+Up to twelve agents claim concurrently. **Jira cannot arbitrate that race**, so the
+filesystem does.
+
+Two verified facts force this design, and both contradict the obvious approach:
+
+- **`editJiraIssue` has no compare-and-swap.** Its schema is
+  `{cloudId, issueIdOrKey, fields, contentFormat, responseContentFormat}` — no version, no
+  ETag, no `update` verb. Writing labels is read-modify-write, so a loser's write silently
+  **erases** the winner's label and exactly one survives. Any rule of the form "if two
+  `agent-*` labels are present, ..." is therefore unreachable and must not be written.
+- **Transitions are global** (`isGlobal: true` on every id). Moving an issue to
+  `In Progress` never fails, even from `In Progress`. **A transition cannot be a claim** —
+  both racers succeed.
+
+So: ownership is decided by an atomic `mkdir` on the shared filesystem. The Jira label and
+the `In Progress` transition are the **board-visible mirror** of a decision already made,
+never the thing being contended.
 
 **1. Find** — unclaimed work is a *status*, not a label. JQL cannot wildcard labels, so
 never try to express "has no `agent-*` label" in JQL:
@@ -50,24 +65,120 @@ project = <projectKey> AND sprint in openSprints()
   ORDER BY Rank ASC
 ```
 
-**2. Claim** — `editJiraIssue` **replaces** the labels array, so this is read-modify-write:
+**2. Lock** — `mkdir` is a POSIX atomic test-and-set: exactly one caller creates the
+directory, every other gets an error. This is the actual claim.
+
+```bash
+CLAIMS=~/.claude/logs/claims/<projectKey>
+mkdir -p "$CLAIMS"
+if mkdir "$CLAIMS/<ISSUE-KEY>" 2>/dev/null; then
+  echo "<your-instance-name>" > "$CLAIMS/<ISSUE-KEY>/owner"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$CLAIMS/<ISSUE-KEY>/heartbeat"
+  echo "CLAIMED"
+else
+  echo "LOST -- owned by $(cat "$CLAIMS/<ISSUE-KEY>/owner" 2>/dev/null || echo unknown)"
+fi
+```
+
+`LOST` is **deterministic, not inferred**. Return to step 1 and pick another issue; do not
+touch the board and do not touch the files.
+
+**3. Read the issue — with an explicit, complete field list.**
 
 ```
-getJiraIssue(issueIdOrKey)                      -> current labels
-editJiraIssue(fields.labels = current + ["agent-coding-2"])
+getJiraIssue(issueIdOrKey,
+             fields=["labels","status","summary","description","issuelinks"])
+```
+
+> **`fields` REPLACES the default set.** `fields=["issuelinks"]` returns issuelinks and
+> **no labels** — and step 4 then writes labels back, which would erase `role-*`,
+> `spec-*` and `group-*` from the issue permanently. Any explicit list **must** include
+> `labels`.
+
+Check `issuelinks` before proceeding. Skip the issue (releasing the lock with
+`rm -rf`, **not** `rmdir` — step 2 put `owner` and `heartbeat` inside it, so `rmdir`
+fails and silently orphans the issue) if it has an inward `is blocked by` whose blocker
+is still `To Do` or
+`In Progress`. A blocker at **`In Review` counts as satisfied** — its `Files:` are on disk
+by then, and nothing reaches `Done` until the group closes, so waiting for `Done` would
+deadlock every intra-group dependency. If the `issuelinks` key is **absent** from the
+response, treat it as UNKNOWN and escalate to the lead — never as "no blockers".
+
+**4. Mirror the claim onto the board** — label first, then transition, both *before* you
+edit any file. This is what tells the lead the issue is taken.
+
+```
+editJiraIssue(fields.labels = <labels from step 3> + ["agent-coding-2"])
 transitionJiraIssue(transition.id = <To Do -> In Progress>)
+addCommentToJiraIssue("Claimed by coding-2.")
 ```
 
 Resolve the transition id from `config.transitions` (or `getTransitionsForJiraIssue`).
 `transitionJiraIssue` takes a transition **id**, never a status name.
 
-**3. Confirm** — re-read the issue. If more than one `agent-*` label is present, two
-instances raced. **The lowest instance name wins, lexicographically.** The loser removes
-its own label and returns to step 1. Both agents evaluate the same rule on the same data
-and reach the same verdict without talking to each other.
+**5. Confirm — fail open, not closed.** Re-read with a **new `getJiraIssue`** (never read
+labels off the `editJiraIssue` response: that is a write-time snapshot and cannot show a
+later overwrite). Then:
 
-**4. Work** — only the files listed in `Files:`. Peers run concurrently; editing outside
-your declared paths clobbers them.
+| What you see | What it means | What to do |
+|---|---|---|
+| My `agent-*` label present | Claim confirmed | Work it |
+| My label absent, **another** `agent-*` present | A peer's write erased mine | You still hold the lock, so this is a stale peer. Comment the conflict, re-apply your label, and continue |
+| My label absent, **no** `agent-*` at all | Unconfirmed write, not a loss | Re-apply the label once, then re-read. Still absent → escalate |
+
+The lock in step 2 already decided ownership, so an absent label is a **bookkeeping**
+failure, not an ownership one. Never abandon an issue you hold the lock on just because a
+read came back stale — message delivery and the MCP are both laggy, and treating that as a
+loss manufactures orphans.
+
+**6. Work** — only the files listed in `Files:`. Peers run concurrently; editing outside
+your declared paths clobbers them. Refresh the heartbeat at each verification step:
+
+```bash
+date -u +%Y-%m-%dT%H:%M:%SZ > ~/.claude/logs/claims/<projectKey>/<ISSUE-KEY>/heartbeat
+```
+
+**7. Release** — after the issue reaches `In Review`, drop the lock so the key is reusable:
+
+```bash
+rm -rf ~/.claude/logs/claims/<projectKey>/<ISSUE-KEY>
+```
+
+### Ground truth for claims is the lock; for state it is Jira
+
+A deliberate split. Ownership is a mutual-exclusion question the filesystem can answer and
+Jira cannot. Status, labels, comments and the verdict remain Jira's. The lock assumes a
+shared `$HOME` — it does not span hosts, and under `isolation: worktree` it only works if
+`$HOME` is shared.
+
+### Recovering an abandoned claim
+
+An issue stuck in `In Progress` is invisible to the Find JQL *and* to the idle work-check,
+so nothing reclaims it automatically. Recovery is the lead's, and it is
+**investigate-first**:
+
+1. The lead's sweep surfaces candidates — `status = "In Progress"` with a `heartbeat`
+   older than **60 minutes** (well clear of the ~29-minute legitimate verification pass
+   that has caused a bad takeover before). **A stale heartbeat is a reason to look, never
+   evidence of death.**
+2. The lead then runs the full liveness protocol in `fullstack-agent.md` — direct
+   `SendMessage` with a bounded reply window, check the disk for partial output and
+   sentinels — before doing anything.
+3. Only on positive evidence of death, the lead performs an explicit **logged release**:
+
+```bash
+rm -rf ~/.claude/logs/claims/<projectKey>/<ISSUE-KEY>       # free the lock
+```
+```
+editJiraIssue(fields.labels = <labels minus the dead agent-* label>)
+transitionJiraIssue(transition.id = <back to To Do>)
+addCommentToJiraIssue("Released from <instance>: <the positive evidence>. Reclaimable.")
+```
+
+Recovery is **respawn-and-reclaim**, never lead takeover. Without the release the issue is
+unreachable: a fresh instance cannot see it (wrong status) and a same-named respawn would
+pass every ownership check trivially, so two live workers would edit the same files with
+nothing detecting it.
 
 ## Verification Sentinel
 

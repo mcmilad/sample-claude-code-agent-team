@@ -21,7 +21,14 @@ def setup_env(tmp_path):
     cfg.write_text(json.dumps({"projectKey": "AGENT"}))
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    return dict(os.environ, HOME=str(home), JIRA_CONFIG_PATH=str(cfg)), home
+    # CLAUDE_PROJECT_DIR must point at an isolated tree. Without it the hook
+    # derives the repo root from its own location and resolves scope against
+    # the developer's real checkout, so adding a jira-run.json to this repo
+    # would silently change what these tests assert.
+    project = tmp_path / "repo"
+    (project / ".claude" / "specs").mkdir(parents=True, exist_ok=True)
+    return dict(os.environ, HOME=str(home), JIRA_CONFIG_PATH=str(cfg),
+                CLAUDE_PROJECT_DIR=str(project)), home
 
 
 def journal(home, events, project="AGENT"):
@@ -106,6 +113,89 @@ def test_fails_open_on_garbage_payload(tmp_path):
     proc = subprocess.run([sys.executable, HOOK], input="not json",
                           capture_output=True, text=True, env=env)
     assert proc.returncode == 0
+
+
+def scoped_repo(tmp_path, slug="auth", group=None):
+    """Give the isolated repo root a jira-run.json naming the live spec."""
+    run_dir = tmp_path / "repo" / ".claude" / "specs" / slug
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"epic": "AGENT-1"}
+    if group is not None:
+        payload["group"] = group
+    (run_dir / "jira-run.json").write_text(json.dumps(payload))
+    return str(tmp_path / "repo")
+
+
+def test_out_of_scope_work_is_flagged_but_never_withheld(tmp_path):
+    """Scope RANKS, it does not filter. An issue from another spec must still
+    reach the teammate -- flagged -- because a filter that drops it turns a
+    stale scope into silent work-abandonment."""
+    env, home = setup_env(tmp_path)
+    env["CLAUDE_PROJECT_DIR"] = scoped_repo(tmp_path, slug="auth")
+    journal(home, [
+        {"op": "create", "key": "AGENT-14", "labels": ["role-coding", "spec-auth"],
+         "status": "To Do"},
+        {"op": "create", "key": "AGENT-99", "labels": ["role-coding", "spec-other"],
+         "status": "To Do"},
+    ])
+    proc = run_hook(env)
+    assert proc.returncode == 2
+    assert "AGENT-14" in proc.stderr and "AGENT-99" in proc.stderr, \
+        "out-of-scope work must still be surfaced"
+    assert "Outside it" in proc.stderr
+    in_line = next(l for l in proc.stderr.splitlines() if "In the current scope" in l)
+    assert "AGENT-14" in in_line and "AGENT-99" not in in_line
+
+
+def test_an_issue_with_no_spec_label_is_never_dropped(tmp_path):
+    """Absence is unknown, not mismatch. Dropping on a MISSING label is how a
+    scoping conjunct silently starves a pool."""
+    env, home = setup_env(tmp_path)
+    env["CLAUDE_PROJECT_DIR"] = scoped_repo(tmp_path, slug="auth")
+    journal(home, [{"op": "create", "key": "AGENT-77", "labels": ["role-coding"],
+                    "status": "To Do"}])
+    proc = run_hook(env)
+    assert proc.returncode == 2
+    assert "AGENT-77" in proc.stderr
+
+
+def test_unresolvable_scope_degrades_to_unpartitioned(tmp_path):
+    env, home = setup_env(tmp_path)
+    env["CLAUDE_PROJECT_DIR"] = str(tmp_path / "no-such-repo")
+    journal(home, [{"op": "create", "key": "AGENT-14", "labels": ["role-coding", "spec-x"],
+                    "status": "To Do"}])
+    proc = run_hook(env)
+    assert proc.returncode == 2
+    assert "AGENT-14" in proc.stderr
+    assert "Outside it" not in proc.stderr
+
+
+def test_reviewers_are_told_not_to_self_claim(tmp_path):
+    """There is exactly one role-review card per sprint and the pool is
+    partitioned by the lead's handoff. Handing four reviewers a self-claim
+    recipe would manufacture the collision it was meant to prevent."""
+    env, home = setup_env(tmp_path)
+    journal(home, [{"op": "create", "key": "AGENT-40", "labels": ["role-review", "spec-auth"],
+                    "status": "To Do"}])
+    proc = run_hook(env, teammate="review-2")
+    assert proc.returncode == 2
+    assert "do NOT self-claim" in proc.stderr
+    assert "mkdir" not in proc.stderr, "reviewers must not be given the claim recipe"
+
+
+def test_nudge_teaches_the_lock_not_the_label_race(tmp_path):
+    """The nudge is a fifth, runtime-injected copy of the claim protocol,
+    delivered at the exact moment an agent claims. If it still taught the
+    unreachable '>1 agent-* label' tie-break, fixing the docs would achieve
+    nothing."""
+    env, home = setup_env(tmp_path)
+    journal(home, [{"op": "create", "key": "AGENT-14", "labels": ["role-coding"],
+                    "status": "To Do"}])
+    err = run_hook(env).stderr
+    assert "mkdir ~/.claude/logs/claims/" in err
+    assert "In Progress" in err
+    assert "lowest instance name" not in err, "the unreachable tie-break must be gone"
+    assert "issuelinks" in err and "must include labels" in err
 
 
 def test_state_path_is_byte_identical_to_the_old_naive_join_for_legitimate_names():

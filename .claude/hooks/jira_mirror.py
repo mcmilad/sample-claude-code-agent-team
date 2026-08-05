@@ -28,7 +28,17 @@ _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 DEFAULT_CONFIG_PATH = os.path.join(_REPO, ".claude", "jira-config.json")
 
 # Fields a mirror event may carry. Absent keys must not clobber known values.
-_MERGEABLE = ("summary", "labels", "status")
+#
+# ADDING A FIELD: it must be added to _DEFAULTS below in the same change. The
+# journal is never versioned, migrated or rotated (fullstack-agent.md explicitly
+# tells teardown to leave it in place), so live journals contain events written
+# before the field existed. A field in _MERGEABLE but not in _DEFAULTS means
+# every consumer doing issue["newfield"] raises KeyError on those old events --
+# which the hooks' fail-open handler swallows, exiting 0 with the guardrail
+# silently disabled and indistinguishable from "nothing to do".
+_MERGEABLE = ("summary", "labels", "status", "files")
+
+_DEFAULTS = {"summary": "", "labels": [], "status": "", "files": []}
 
 
 def load_config(path=None):
@@ -74,11 +84,13 @@ def append_event(project_key, event):
 
 
 def load_state(project_key):
-    """Fold the journal into {issue_key: {summary, labels, status}}.
+    """Fold the journal into {issue_key: {summary, labels, status, files}}.
 
     Later events win per field; a field absent from an event leaves the prior
     value intact (a transition event carries no labels, and must not erase them).
-    Corrupt lines are skipped rather than aborting the fold.
+    Every key in _DEFAULTS is always present, so an event written before a field
+    existed yields the default rather than a KeyError. Corrupt lines are skipped
+    rather than aborting the fold.
     """
     state = {}
     try:
@@ -100,7 +112,7 @@ def load_state(project_key):
         key = event.get("key")
         if not key:
             continue
-        issue = state.setdefault(key, {"summary": "", "labels": [], "status": ""})
+        issue = state.setdefault(key, dict(_DEFAULTS))
         for field in _MERGEABLE:
             if event.get(field) is not None:
                 issue[field] = event[field]

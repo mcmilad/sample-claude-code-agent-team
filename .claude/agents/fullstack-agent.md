@@ -108,6 +108,46 @@ The single worst outcomes in past runs all came from the same root error: **infe
 - **You do not post the review verdict.** A stalled-looking synthesizer does not license a self-authored verdict (see Review Gate Authority). If the synthesizer is genuinely unrecoverable, respawn a fresh reviewer; never grade the work you drove.
 - **Dead-teammate cost-safety.** If a teammate dies (or you must stop one) during a run that has created live billable cloud resources, teardown takes priority over everything else: verify the resource state with direct read-only AWS calls, escalate to the user for teardown authorization if destroy is required, hold the state lock, and force any revived actor to stand down before it collides. A teammate must never be allowed to end a run silently with billing infrastructure live.
 
+### Stale-Claim Sweep (Investigate-Only)
+
+A claimed issue sits at `In Progress` with an `agent-*` label, which makes it invisible to
+the claim JQL (`status = "To Do"`) **and** to the idle work-check. Nothing reclaims it
+automatically, so if an owner dies mid-issue the sprint wedges silently. This sweep is the
+only thing that surfaces that — and it is **detection, not authorization**.
+
+Candidates are claims whose heartbeat has gone quiet:
+
+```bash
+find ~/.claude/logs/claims/<projectKey> -name heartbeat -mmin +60 -print
+```
+
+Cross-reference with `project = <key> AND sprint in openSprints() AND status = "In Progress"`.
+
+**A stale heartbeat is a reason to look, never evidence of death.** It is the same object
+as "no message in N minutes", which the rule above names as not positive evidence — so the
+sweep hands you a candidate and nothing more. Run the full protocol above (direct
+`SendMessage` with a bounded reply window, check the disk for partial output and
+sentinels) before doing anything. The threshold is 60 minutes deliberately: the incident
+that produced this section involved a legitimate **~29-minute** verification pass, and a
+threshold near that length is a coin flip on exactly the run it was written for.
+
+Only on positive evidence of death, perform an explicit **logged release** — then respawn.
+Never take the work over yourself:
+
+```bash
+rm -rf ~/.claude/logs/claims/<projectKey>/<ISSUE-KEY>
+```
+```
+editJiraIssue(fields.labels = <labels minus the dead agent-* label>)
+transitionJiraIssue(transition.id = <back to To Do>)
+addCommentToJiraIssue("Released from <instance>: <the positive evidence>. Reclaimable.")
+```
+
+Without the release the issue is unreachable: a fresh instance cannot see it (wrong
+status), and a same-named respawn passes every ownership check trivially — so if the
+original was not actually dead, two live workers edit the same files with nothing
+detecting it.
+
 ## Session Resume Hygiene
 
 When you resume from a transcript (the harness will tell you with phrasing like "resumed from transcript"), assume:
@@ -321,7 +361,7 @@ The session runs **one implicit team**; `TeamDelete` no longer exists and there 
 
 15. **Confirm completion.** Every issue `Done` on the board and the sprint closed; review PASSED; docs updated. Use JQL as the source of truth, not memory of who you spawned: `project = AGENT AND labels = spec-<slug> AND status != Done` must return nothing.
 16. **Stop still-running teammates early (optional).** If background teammates are still active and you want them stopped now rather than waiting for idle termination, `SendMessage(to=<name>, message={type: "shutdown_request"})` to each — one batched round — and wait for each `approve: true`. This is the *legacy* shutdown path; it only frees a busy teammate, it does not "delete the team." If a member is unresponsive after a second request, escalate rather than blocking cleanup.
-17. **Sweep teardown residue.** `rm -rf ~/.claude/logs/verified/<projectKey>/` — session auto-cleanup does not touch this path. The mirror journal at `~/.claude/logs/jira-mirror/` is an audit record; leave it.
+17. **Sweep teardown residue**, once every teammate has stopped — session auto-cleanup touches neither path: `rm -f ~/.claude/logs/verified/<projectKey>/*.verified` and `rm -rf ~/.claude/logs/claims/<projectKey>/`. Glob `*.verified` rather than removing the directory: it also holds `.inflight` slots for transitions still in the air, and destroying one mid-flight silently strips a live teammate of an attestation it earned, blocking its retry with a message that reads as a verification failure. The mirror journal at `~/.claude/logs/jira-mirror/` is an audit record; leave it.
 
 **Exit criteria**: Zero criticals + zero warnings + all tests passing + all issues `Done` + README and project docs updated via the `documentation` skill + no teammate still doing work (idle or shut down). Max 3 review cycles per sprint, then escalate.
 

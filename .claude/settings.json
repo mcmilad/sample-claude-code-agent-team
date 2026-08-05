@@ -59,6 +59,15 @@
         ]
       },
       {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/claim_gate.py\""
+          }
+        ]
+      },
+      {
         "matcher": "mcp__plugin_atlassian_atlassian__createJiraIssue",
         "hooks": [
           {
@@ -84,6 +93,15 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/jira_mirror_journal.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__plugin_atlassian_atlassian__transitionJiraIssue",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/jira_transition_sentinel_finalize.py\""
           }
         ]
       }

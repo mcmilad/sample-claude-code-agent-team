@@ -173,3 +173,119 @@ def test_fails_open_on_garbage_payload(tmp_path):
     proc = subprocess.run([sys.executable, HOOK], input="not json",
                           capture_output=True, text=True, env=env)
     assert proc.returncode == 0
+
+
+def seed_journal(tmp_path, events, project="AGENT"):
+    d = os.path.join(str(tmp_path / "home"), ".claude", "logs", "jira-mirror")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, project + ".jsonl"), "a") as fh:
+        for event in events:
+            fh.write(json.dumps(event) + "\n")
+
+
+def test_blocks_files_overlapping_a_sibling_in_the_same_scope(tmp_path):
+    """fullstack-agent.md calls sprint-wide Files: disjointness 'the sole
+    guarantee against conflicts under the shared-tree pool model'. Since no
+    atomic claim primitive is reachable through Jira, this is the last layer
+    between a claim race and two agents clobbering the same file."""
+    seed_journal(tmp_path, [{
+        "op": "create", "key": "AGENT-14", "status": "To Do",
+        "labels": ["spec-auth-api", "role-coding", "group-2"],
+        "files": ["src/auth/login.py"],
+    }])
+    proc = run_hook(well_formed(), tmp_path)
+    assert proc.returncode == 2
+    assert "AGENT-14" in proc.stderr
+    assert "src/auth/login.py" in proc.stderr
+
+
+def test_allows_overlap_across_different_groups(tmp_path):
+    """Sequencing two overlapping issues into different groups is the documented
+    escape hatch, so it must not be blocked."""
+    seed_journal(tmp_path, [{
+        "op": "create", "key": "AGENT-14", "status": "To Do",
+        "labels": ["spec-auth-api", "role-coding", "group-1"],
+        "files": ["src/auth/login.py"],
+    }])
+    assert run_hook(well_formed(), tmp_path).returncode == 0
+
+
+def test_allows_overlap_with_a_done_issue(tmp_path):
+    seed_journal(tmp_path, [{
+        "op": "create", "key": "AGENT-14", "status": "To Do",
+        "labels": ["spec-auth-api", "role-coding", "group-2"],
+        "files": ["src/auth/login.py"],
+    }, {"op": "transition", "key": "AGENT-14", "status": "Done"}])
+    assert run_hook(well_formed(), tmp_path).returncode == 0
+
+
+def test_overlap_check_tolerates_journal_events_predating_the_files_field(tmp_path):
+    """The journal is never versioned, migrated or rotated, so live journals
+    hold events written before `files` existed. Those must yield the default,
+    not a KeyError that fails the hook open with the guardrail silently off."""
+    seed_journal(tmp_path, [{
+        "op": "create", "key": "AGENT-9", "status": "To Do",
+        "labels": ["spec-auth-api", "role-coding", "group-2"],
+        "summary": "[coding] older issue with no files key",
+    }])
+    proc = run_hook(well_formed(), tmp_path)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_overlap_does_not_fire_without_a_spec_label(tmp_path):
+    """A missing label is unknown, not a match."""
+    seed_journal(tmp_path, [{
+        "op": "create", "key": "AGENT-14", "status": "To Do",
+        "labels": ["role-coding"], "files": ["src/auth/login.py"],
+    }])
+    assert run_hook(well_formed(), tmp_path).returncode == 0
+
+
+def test_bypass_label_still_skips_the_overlap_check(tmp_path):
+    seed_journal(tmp_path, [{
+        "op": "create", "key": "AGENT-14", "status": "To Do",
+        "labels": ["spec-auth-api", "role-coding", "group-2"],
+        "files": ["src/auth/login.py"],
+    }])
+    issue = well_formed()
+    issue["additional_fields"] = {
+        "labels": ["spec-auth-api", "role-coding", "group-2", "skip-format-check"]}
+    assert run_hook(issue, tmp_path).returncode == 0
+
+
+def test_blocks_a_files_section_the_journaller_cannot_parse(tmp_path):
+    """The check accepted a bare `Files:` substring while the journaller needs it
+    line-anchored, so a bolded or bulleted label passed the create and journalled
+    NO paths -- silently disabling both the overlap check and the claim gate."""
+    proc = run_hook(well_formed(description=(
+        "Spec: .claude/specs/auth-api/spec.md\n"
+        "**Files:**\n  - src/auth/login.py\n"
+        "Acceptance: works\nRun: pytest -q"
+    )), tmp_path)
+    assert proc.returncode == 2
+    assert "no paths could be parsed" in proc.stderr
+
+
+def test_does_not_block_a_create_whose_only_clash_is_at_in_review(tmp_path):
+    """Disjointness stops two CONCURRENT writers. An issue at In Review has
+    finished writing, and claim_gate already treats it as landed -- the two
+    guardrails must not disagree about what 'landed' means."""
+    seed_journal(tmp_path, [
+        {"op": "create", "key": "AGENT-14", "status": "To Do",
+         "labels": ["spec-auth-api", "role-coding", "group-2"],
+         "files": ["src/auth/login.py"]},
+        {"op": "transition", "key": "AGENT-14", "status": "In Review"},
+    ])
+    assert run_hook(well_formed(), tmp_path).returncode == 0
+
+
+def test_a_json_string_tool_input_does_not_disable_the_check(tmp_path):
+    """`or {}` passed a truthy non-dict straight through; .get() then raised and
+    the fail-open handler exited 0, creating a malformed issue unchecked."""
+    cfg = tmp_path / "jira-config.json"
+    cfg.write_text(json.dumps({"projectKey": "AGENT"}))
+    env = dict(os.environ, HOME=str(tmp_path / "home"), JIRA_CONFIG_PATH=str(cfg))
+    payload = {"tool_name": CREATE, "tool_input": json.dumps(well_formed())}
+    proc = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
+                          capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, "a string tool_input names no project -- not policed"

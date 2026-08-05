@@ -322,3 +322,60 @@ def test_exits_zero_on_garbage_payload(tmp_path, monkeypatch):
     proc = subprocess.run([sys.executable, HOOK], input="not json",
                           capture_output=True, text=True, env=env)
     assert proc.returncode == 0
+
+
+def test_create_with_a_transition_records_the_real_status(tmp_path, monkeypatch):
+    """createJiraIssue exposes a top-level transition (verified against the live
+    schema). Hardcoding 'To Do' mirrored an issue created straight into
+    In Progress as unclaimed -- and since a create carries no agent-* label, the
+    idle check then advertised it to every teammate of that role."""
+    cfg = tmp_path / "jira-config.json"
+    cfg.write_text(json.dumps({
+        "projectKey": "AGENT",
+        "transitions": {"11": "To Do", "21": "In Progress", "31": "In Review"},
+    }))
+    monkeypatch.setenv("JIRA_CONFIG_PATH", str(cfg))
+    home = tmp_path / "home"
+    run_hook({
+        "tool_name": TOOL + "createJiraIssue",
+        "tool_input": {
+            "projectKey": "AGENT",
+            "summary": "[coding] already underway",
+            "transition": {"id": "21"},
+            "additional_fields": {"labels": ["role-coding", "spec-x"]},
+        },
+        "tool_response": {"key": "AGENT-50"},
+    }, home)
+    events = [e for e in read_journal(home) if e.get("key") == "AGENT-50"]
+    assert events and events[0]["status"] == "In Progress"
+
+
+def test_create_without_a_transition_still_defaults_to_to_do(tmp_path, monkeypatch):
+    write_config(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    run_hook({
+        "tool_name": TOOL + "createJiraIssue",
+        "tool_input": {"projectKey": "AGENT", "summary": "[coding] fresh",
+                       "additional_fields": {"labels": ["role-coding", "spec-x"]}},
+        "tool_response": {"key": "AGENT-51"},
+    }, home)
+    events = [e for e in read_journal(home) if e.get("key") == "AGENT-51"]
+    assert events and events[0]["status"] == "To Do"
+
+
+def test_create_journals_the_declared_files(tmp_path, monkeypatch):
+    write_config(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    run_hook({
+        "tool_name": TOOL + "createJiraIssue",
+        "tool_input": {
+            "projectKey": "AGENT",
+            "summary": "[coding] impl",
+            "description": ("Spec: x\nFiles: src/a.py, `src/b.py`\n"
+                            "Acceptance: y\nRun: pytest -q"),
+            "additional_fields": {"labels": ["role-coding", "spec-x"]},
+        },
+        "tool_response": {"key": "AGENT-52"},
+    }, home)
+    events = [e for e in read_journal(home) if e.get("key") == "AGENT-52"]
+    assert events and events[0]["files"] == ["src/a.py", "src/b.py"]

@@ -38,7 +38,11 @@ Invoke these skills via the `Skill` tool at the start of your session, BEFORE cl
 - **To devops-agent**: Proactively share specific service recommendations with configuration details they can implement
 - **To coding-agent**: SDK usage guidance, service client config, retry/backoff patterns
 - **To review-agent**: AWS-specific context for infrastructure findings
-- After finishing, run the role JQL again and self-claim the next unclaimed issue
+- After finishing, run the role JQL again and self-claim the next unclaimed issue — full
+  claim protocol in `jira-workflow`: take the `mkdir` lock **first** (it, not the label,
+  decides ownership), then label, transition to `In Progress`, and comment. The `sa` pool
+  is capped at one instance, so you will not normally race a peer — take the lock anyway,
+  because it is also what the lead's stale-claim sweep reads.
 
 ## Capabilities
 

@@ -12,6 +12,7 @@ Always exits 0. This hook observes; it never gates.
 """
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -97,6 +98,35 @@ def _succeeded(response):
     return bool(response)
 
 
+def parse_files(description):
+    """Extract the `Files:` list from an issue description, or None.
+
+    fullstack-agent.md calls sprint-wide Files: disjointness "the sole guarantee
+    against conflicts under the shared-tree pool model", but nothing could check
+    it: the mirror recorded summary/labels/status and never the description, so
+    no hook could see the declared paths. Journalling the parsed list is what
+    makes jira_issue_format_check's overlap check possible at all.
+
+    Deliberately forgiving -- a path this fails to parse is simply not enforced,
+    which is the status quo, whereas over-parsing would block a valid create.
+    """
+    if not isinstance(description, str):
+        return None
+    match = re.search(r"^\s*Files:\s*(.+)$", description, re.M)
+    if not match:
+        return None
+    paths = []
+    for raw in match.group(1).split(","):
+        path = raw.strip().strip("`").rstrip(".").strip()
+        if path:
+            paths.append(path)
+    return paths or None
+
+
+def _files_from_description(description):
+    return parse_files(description)
+
+
 def _labels_from_create(tool_input):
     # as_dict, not `or {}`: additional_fields commonly arrives as a JSON string,
     # on which .get() raises. The outer handler would then fail open and journal
@@ -177,12 +207,20 @@ def main():
                 "create succeeded but no issue key could be extracted -- "
                 "unrecognized create response shape (keys: {})".format(
                     ",".join(sorted(as_dict(p.get("tool_response")))) or "none")))
+        # createJiraIssue exposes a top-level `transition` (verified against the
+        # live schema), so an issue can be created straight into In Progress.
+        # Hardcoding 'To Do' mirrored such an issue as unclaimed work and -- since
+        # a create carries no agent-* label -- advertised it to every teammate of
+        # that role. An absent or unrecognized id still falls back to To Do.
+        created_id = str(as_dict(tool_input.get("transition")).get("id", ""))
+        created_status = (cfg.get("transitions") or {}).get(created_id) or "To Do"
         event.update({
             "op": "create",
             "key": key,
             "summary": tool_input.get("summary"),
             "labels": _labels_from_create(tool_input),
-            "status": "To Do",
+            "status": created_status,
+            "files": _files_from_description(tool_input.get("description")),
         })
     else:
         key = tool_input.get("issueIdOrKey")

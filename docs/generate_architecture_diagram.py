@@ -286,7 +286,7 @@ def build():
     # ======================================================================
     ax.plot([4, XLIM - 4], [5.6, 5.6], color="#BDBDBD", lw=1)
     ax.text(XLIM / 2, 2.6,
-             "plan / build / review / fix   |   Jira is the system of record   |   four fail-open hooks",
+             "plan / build / review / fix   |   Jira is the system of record   |   eight fail-open hooks",
              fontsize=10.5, ha="center", va="center", color="#333333", style="italic")
 
     fig.savefig(OUT_PATH, dpi=170, bbox_inches="tight", facecolor="white")

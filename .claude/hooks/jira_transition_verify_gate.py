@@ -4,8 +4,26 @@
 Replaces the old TaskCompleted gate. A transition into a gated status
 (In Review, Done) is blocked unless the acting teammate left a sentinel at
     ~/.claude/logs/verified/<PROJECT>/<ISSUE-KEY>.verified
-written after that issue's `Run:` command passed. The sentinel is consumed on
-success so it cannot be reused for a later re-transition.
+written after that issue's `Run:` command passed. One sentinel authorizes at
+most one SUCCESSFUL transition.
+
+TWO-PHASE CONSUME. This hook does not delete the sentinel -- it atomically
+renames it to <ISSUE-KEY>.inflight. The rename is the consume: it takes effect
+immediately, so a second concurrent transition finds no .verified and is
+blocked. jira_transition_sentinel_finalize.py (PostToolUse) then deletes the
+.inflight on affirmative success, or restores it to .verified otherwise.
+
+Why not delete here: the MCP call had not happened yet. A 401, 429, 5xx or
+timeout destroyed the attestation and permanently blocked the retry -- observed
+live on AGENT-11 (2026-08-05T05:47:48Z), where the gate allowed and consumed but
+no transition ever landed, so the issue could never close. Why not move the
+whole consume to PostToolUse: that would leave the gate check-only for the
+duration of the round trip, letting one sentinel authorize two gated
+transitions.
+
+If the tool is never invoked at all (denied, cancelled), no PostToolUse fires
+and the .inflight lingers; it becomes reclaimable after INFLIGHT_STALE_SECONDS
+so a legitimate retry is never permanently wedged.
 
 Why a sentinel rather than reading the transcript: the hook payload's
 transcript belongs to whichever session triggered it, and a hook cannot observe
@@ -21,10 +39,11 @@ internal error allows the transition.
 """
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from team_hook_common import (  # noqa: E402
-    read_payload, allow, block, audit, safe_path_component, verified_dir,
+    read_payload, allow, block, audit, as_dict, safe_path_component, verified_dir,
 )
 import jira_mirror  # noqa: E402
 
@@ -32,16 +51,29 @@ EVENT = "PreToolUse"
 TRANSITION = "mcp__plugin_atlassian_atlassian__transitionJiraIssue"
 DEFAULT_GATED = ("In Review", "Done")
 
+# How long an .inflight may sit before a retry may reclaim it. Covers a normal
+# MCP round trip with wide margin; only reached when PostToolUse never fired,
+# i.e. the tool call was denied or cancelled rather than executed.
+INFLIGHT_STALE_SECONDS = 300
 
-def sentinel_path(project, issue_key):
+
+def _sentinel_base(project, issue_key):
     # Both components come from the payload and are attacker-influenceable; this
-    # path is passed to os.remove on success, so each is reduced to a single
-    # safe path component that cannot escape the verified directory.
+    # path is passed to os.rename/os.remove, so each is reduced to a single safe
+    # path component that cannot escape the verified directory.
     return os.path.join(
         verified_dir(),
         safe_path_component(project, default="_noproject"),
-        safe_path_component(issue_key, default="_noissue") + ".verified",
+        safe_path_component(issue_key, default="_noissue"),
     )
+
+
+def sentinel_path(project, issue_key):
+    return _sentinel_base(project, issue_key) + ".verified"
+
+
+def inflight_path(project, issue_key):
+    return _sentinel_base(project, issue_key) + ".inflight"
 
 
 def main():
@@ -49,7 +81,11 @@ def main():
     if p.get("tool_name") != TRANSITION:
         allow()
 
-    tool_input = p.get("tool_input") or {}
+    # as_dict, not `or {}`: a truthy non-dict (tool_input arriving as a JSON
+    # STRING is a documented model failure mode) passes `or {}` untouched and
+    # raises on the next .get(), which the fail-open handler swallows -- the
+    # gate then exits 0 and an unverified transition sails through.
+    tool_input = as_dict(p.get("tool_input"))
     cfg = jira_mirror.load_config()
     project = cfg.get("projectKey")
     if not project:
@@ -91,24 +127,57 @@ def main():
         allow(EVENT, p, reason="skip-verify label present")
 
     path = sentinel_path(project, issue_key)
-    if not os.path.exists(path):
-        block(EVENT, p, (
-            "Transition of {} to '{}' blocked by the verification gate: no sentinel at\n"
-            "  {}\n\n"
-            "Attest, then retry -- whichever applies to you: if you ran this issue's "
-            "`Run:` command, attest that it passed; if you are the reviewer closing after "
-            "a PASS verdict, attest that verdict instead.\n"
-            "  mkdir -p {}\n"
-            "  echo '<what you attested> PASSED' > {}\n\n"
-            "If this issue genuinely has no runnable verification, ask the lead to add "
-            "the skip-verify label."
-        ).format(issue_key, target, path, os.path.dirname(path), path))
+    inflight = inflight_path(project, issue_key)
 
-    try:
-        os.remove(path)  # consume -- one sentinel, one transition
-    except Exception:
-        pass
-    allow(EVENT, p, reason="verified via sentinel for {} -> {}".format(issue_key, target))
+    if os.path.exists(path):
+        try:
+            # Atomic consume. A peer that renamed first makes this raise, and
+            # that peer now owns the one transition this sentinel authorizes.
+            os.rename(path, inflight)
+        except OSError:
+            if not os.path.exists(path):
+                block(EVENT, p, (
+                    "Transition of {} to '{}' blocked: its sentinel was consumed by "
+                    "another transition that is still in flight. One sentinel authorizes "
+                    "one transition -- wait for that one to land, or attest again."
+                ).format(issue_key, target))
+            # Rename failed but the sentinel is still there (e.g. a read-only
+            # log dir). Fail open rather than trap a verified transition.
+            allow(EVENT, p, reason="sentinel present but not consumable -- fail-open")
+        allow(EVENT, p, reason="verified via sentinel for {} -> {}".format(
+            issue_key, target))
+
+    if os.path.exists(inflight):
+        try:
+            stale = (time.time() - os.path.getmtime(inflight)) > INFLIGHT_STALE_SECONDS
+        except OSError:
+            stale = False
+        if stale:
+            # PostToolUse never fired, so the previous call was never executed.
+            # Permit the retry and re-stamp so two retries cannot both pass.
+            try:
+                os.utime(inflight, None)
+            except OSError:
+                pass
+            allow(EVENT, p, reason="stale in-flight sentinel reclaimed for {}".format(
+                issue_key))
+        block(EVENT, p, (
+            "Transition of {} to '{}' blocked: a transition using this sentinel is "
+            "already in flight. If that call failed, the sentinel is restored "
+            "automatically -- retry in a moment."
+        ).format(issue_key, target))
+
+    block(EVENT, p, (
+        "Transition of {} to '{}' blocked by the verification gate: no sentinel at\n"
+        "  {}\n\n"
+        "Attest, then retry -- whichever applies to you: if you ran this issue's "
+        "`Run:` command, attest that it passed; if you are the reviewer closing after "
+        "a PASS verdict, attest that verdict instead.\n"
+        "  mkdir -p {}\n"
+        "  echo '<what you attested> PASSED' > {}\n\n"
+        "If this issue genuinely has no runnable verification, ask the lead to add "
+        "the skip-verify label."
+    ).format(issue_key, target, path, os.path.dirname(path), path))
 
 
 if __name__ == "__main__":

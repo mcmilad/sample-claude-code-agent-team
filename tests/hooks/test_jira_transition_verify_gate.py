@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import time
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -86,12 +87,104 @@ def test_allows_in_review_with_sentinel(tmp_path):
     assert run_hook(env, transition_id="31").returncode == 0
 
 
+FINALIZE = os.path.join(REPO, ".claude", "hooks", "jira_transition_sentinel_finalize.py")
+
+
+def run_finalize(env, issue="AGENT-14", response="Issue transitioned successfully"):
+    payload = {
+        "tool_name": TRANSITION,
+        "tool_input": {"issueIdOrKey": issue, "transition": {"id": "31"}},
+        "tool_response": response,
+    }
+    return subprocess.run([sys.executable, FINALIZE], input=json.dumps(payload),
+                          capture_output=True, text=True, env=env)
+
+
+def inflight_of(path):
+    return path[: -len(".verified")] + ".inflight"
+
+
 def test_consumes_the_sentinel_so_it_cannot_be_reused(tmp_path):
+    """One sentinel authorizes one SUCCESSFUL transition. The PreToolUse rename
+    is the consume -- it takes effect before the MCP call, so a second
+    concurrent transition is blocked -- and PostToolUse spends it on success."""
     env, home = setup_env(tmp_path)
     path = sentinel(home)
     assert run_hook(env, transition_id="31").returncode == 0
-    assert not os.path.exists(path)
+    assert not os.path.exists(path), "the .verified must be consumed immediately"
+    assert os.path.exists(inflight_of(path)), "consumed means in-flight, not gone"
+
+    # A second transition while the first is in flight is blocked.
     assert run_hook(env, transition_id="31").returncode == 2
+
+    assert run_finalize(env).returncode == 0
+    assert not os.path.exists(inflight_of(path)), "success spends the sentinel"
+    assert run_hook(env, transition_id="31").returncode == 2
+
+
+def test_a_failed_transition_restores_the_sentinel(tmp_path):
+    """The regression this whole two-phase design exists for. Observed live on
+    AGENT-11: the gate allowed and destroyed the sentinel, the MCP call never
+    landed, and the retry was blocked with 'no sentinel' -- which reads to an
+    agent as a verification failure, not an API failure."""
+    env, home = setup_env(tmp_path)
+    path = sentinel(home)
+    assert run_hook(env, transition_id="31").returncode == 0
+
+    assert run_finalize(env, response="Error: 401 Unauthorized").returncode == 0
+    assert os.path.exists(path), "a failed transition must leave the sentinel usable"
+    assert not os.path.exists(inflight_of(path))
+    assert run_hook(env, transition_id="31").returncode == 0, "the retry must pass"
+
+
+def test_an_error_string_is_not_treated_as_success(tmp_path):
+    """jira_mirror_journal._succeeded() counts any non-empty string as success,
+    and a bare string is the live tool_response shape. Reusing it here would
+    make the finalizer a no-op for exactly the case it targets."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("finalize", FINALIZE)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["finalize"] = mod
+    spec.loader.exec_module(mod)
+
+    assert mod.transition_succeeded("Issue transitioned") is True
+    assert mod.transition_succeeded({"status": "ok"}) is True
+    assert mod.transition_succeeded("Error: could not transition") is False
+    assert mod.transition_succeeded("Request failed with 403") is False
+    assert mod.transition_succeeded({"errorMessages": ["nope"]}) is False
+    assert mod.transition_succeeded("") is False
+    assert mod.transition_succeeded(None) is False
+
+
+def test_evidence_free_response_restores_rather_than_spends(tmp_path):
+    """A response carrying no evidence either way must resolve to restore: a
+    wrongly-restored sentinel costs at most one extra authorized transition, a
+    wrongly-spent one wedges the issue -- which is the failure actually observed.
+
+    Note the deliberate limit: a STRUCTURED response with no error key still
+    counts as success, matching jira_mirror_journal's live-verified convention.
+    Demanding a positive success key there would restore genuinely-spent
+    sentinels and break single-use, since the response shape is not contractual."""
+    env, home = setup_env(tmp_path)
+    path = sentinel(home)
+    assert run_hook(env, transition_id="31").returncode == 0
+    assert run_finalize(env, response=[]).returncode == 0
+    assert os.path.exists(path), "an evidence-free response must restore the sentinel"
+
+
+def test_stale_inflight_is_reclaimable_when_the_tool_never_ran(tmp_path):
+    """If the call is denied or cancelled, PostToolUse never fires and the
+    .inflight would otherwise wedge the issue forever."""
+    env, home = setup_env(tmp_path)
+    path = sentinel(home)
+    assert run_hook(env, transition_id="31").returncode == 0
+    inflight = inflight_of(path)
+    assert os.path.exists(inflight)
+
+    assert run_hook(env, transition_id="31").returncode == 2, "fresh in-flight blocks"
+    old = time.time() - 3600
+    os.utime(inflight, (old, old))
+    assert run_hook(env, transition_id="31").returncode == 0, "stale in-flight is reclaimable"
 
 
 def test_allows_ungated_transitions_without_sentinel(tmp_path):
@@ -169,3 +262,52 @@ def test_sentinel_path_cannot_traverse_out_of_verified_dir(tmp_path):
     # must not touch anything outside the verified dir.
     assert proc.returncode == 0
     assert os.path.exists("/etc/passwd"), "a traversal must never reach a real path"
+
+
+def _finalize_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("finalize_mod", FINALIZE)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["finalize_mod"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_json_object_serialized_as_a_string_is_decoded_not_keyword_scanned():
+    """The live wire carries JSON-as-a-string. Falling through to the prose
+    regex keyword-scans the issue's OWN embedded text, and both directions of
+    that mistake are damaging -- verified against real recorded responses."""
+    mod = _finalize_module()
+
+    # FAILURE misread as success -> the sentinel is deleted for a transition
+    # that never landed. This is the AGENT-11 wedge. Note "errorMessages"
+    # contains no standalone word "error", so the prose regex misses it.
+    assert mod.transition_succeeded('{"errorMessages": ["Issue does not exist"]}') is False
+    assert mod.transition_succeeded('{"success": false}') is False
+    assert mod.transition_succeeded({"success": False}) is False
+
+    # SUCCESS misread as failure -> a spent sentinel is resurrected and a second
+    # gated transition is authorized with no re-verification. "512" here comes
+    # from an issue description ("memory 512 MB"), not an HTTP status.
+    assert mod.transition_succeeded(
+        '{"success": true, "fields": {"description": "memory 512 MB, timeout 10 s"}}'
+    ) is True
+    assert mod.transition_succeeded('{"success": true}') is True
+
+
+def test_prose_screening_still_applies_to_genuinely_unstructured_text():
+    mod = _finalize_module()
+    assert mod.transition_succeeded("Issue transitioned") is True
+    assert mod.transition_succeeded("Error: could not transition") is False
+    assert mod.transition_succeeded("not valid json {") is True
+
+
+def test_a_failure_encoded_as_a_json_string_restores_the_sentinel(tmp_path):
+    """End-to-end on the shape that matters, through both real hooks."""
+    env, home = setup_env(tmp_path)
+    path = sentinel(home)
+    assert run_hook(env, transition_id="31").returncode == 0
+    assert run_finalize(
+        env, response='{"errorMessages": ["Issue does not exist"]}').returncode == 0
+    assert os.path.exists(path), "a failed transition must leave the sentinel usable"
+    assert run_hook(env, transition_id="31").returncode == 0, "the retry must pass"
