@@ -35,6 +35,11 @@ Usage (in a separate terminal, not the Claude Code session's shell):
     python3 scripts/jira_bootstrap.py discover --key AGENT
     python3 scripts/jira_bootstrap.py sprint-open --name "Group 1 - interfaces"
     python3 scripts/jira_bootstrap.py sprint-close --id 42
+
+    # Cleanup for smoke-test issues (the Atlassian MCP has no delete tool).
+    # Omitting --confirm is a dry run: it reports the plan and deletes nothing.
+    python3 scripts/jira_bootstrap.py delete-issues --keys AGENT-2,AGENT-3,AGENT-1
+    python3 scripts/jira_bootstrap.py delete-issues --keys AGENT-2,AGENT-3,AGENT-1 --confirm
 """
 import argparse
 import base64
@@ -100,21 +105,61 @@ def _http(method, url, body, headers):
     return json.loads(raw) if raw.strip() else {}
 
 
+def _http_with_status(method, url, body, headers):
+    """Status-inspecting transport, used only where a caller needs to treat a
+    4xx as a *signal* rather than a fatal error -- the delete-issues route
+    probe (404 means "route exists", 405/410 mean "route moved or was
+    removed"), and per-key deletes (404 means "already gone", not a failure).
+
+    `_http` above is untouched and keeps raising HTTPError for every existing
+    caller; this is a separate function so that contract never changes.
+    Returns (status, data). A 204/empty body decodes to {} rather than
+    raising on json.loads("").  Tests replace JiraAdmin.transport_status with
+    a stub of the same (status, data) shape.
+    """
+    data = body.encode() if isinstance(body, str) else body
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+            status = resp.status
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode()
+        status = e.code
+    if not raw.strip():
+        return status, {}
+    try:
+        return status, json.loads(raw)
+    except ValueError:
+        return status, {"raw": raw}
+
+
 class JiraAdmin:
     def __init__(self, site, email, token):
         self.site = site.replace("https://", "").rstrip("/")
         self.auth = base64.b64encode("{}:{}".format(email, token).encode()).decode()
         self.transport = _http
+        self.transport_status = _http_with_status
 
-    def request(self, method, path, body=None):
-        url = "https://{}{}".format(self.site, path)
-        headers = {
+    def _headers(self):
+        return {
             "Authorization": "Basic " + self.auth,
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+
+    def request(self, method, path, body=None):
+        url = "https://{}{}".format(self.site, path)
         payload = json.dumps(body) if body is not None else None
-        return self.transport(method, url, payload, headers)
+        return self.transport(method, url, payload, self._headers())
+
+    def request_status(self, method, path, body=None):
+        """Like `request`, but never raises on a 4xx/5xx -- returns
+        (status, data) so the caller can inspect the code itself. See
+        `_http_with_status` for why this is a separate transport."""
+        url = "https://{}{}".format(self.site, path)
+        payload = json.dumps(body) if body is not None else None
+        return self.transport_status(method, url, payload, self._headers())
 
     # -- project ---------------------------------------------------------
 
@@ -297,6 +342,48 @@ class JiraAdmin:
         return self.request("POST", "/rest/agile/1.0/sprint/{}".format(sprint_id),
                             {"state": "closed"})
 
+    # -- deletion ----------------------------------------------------------
+    #
+    # The delete endpoint's exact semantics were never confirmed against
+    # Atlassian's docs (the pages truncated on fetch during this project) --
+    # only the probe below, run live, establishes what a given site actually
+    # does. Every method here is written to degrade loudly rather than
+    # assume: an unexpected status aborts instead of being treated as success.
+
+    def probe_delete_route(self, project_key):
+        """Spend one throwaway DELETE, against a key that cannot exist in the
+        project, to convert "does this route still exist, and are we
+        authorised" from an assumption into a fact -- the same discipline
+        `discover_ids` applies to /rest/api/3/search, which Atlassian removed
+        (410) without changing its shape otherwise. Returns the raw status
+        code; the caller decides what each one means.
+        """
+        probe_key = "{}-999999".format(project_key)
+        status, _ = self.request_status("DELETE", "/rest/api/3/issue/{}".format(probe_key))
+        return status
+
+    def get_issue_parent(self, key):
+        """Returns the parent issue's key, or None if the issue has no parent
+        -- including when the issue can't be fetched at all (already gone, or
+        some other error). Ordering only needs a best-effort signal: a key
+        that can't be resolved just falls into the parentless group, and the
+        real delete call surfaces whatever is actually wrong with it.
+        """
+        status, data = self.request_status(
+            "GET", "/rest/api/3/issue/{}?fields=parent".format(key))
+        if status != 200:
+            return None
+        return _as_dict(_as_dict(data.get("fields")).get("parent")).get("key")
+
+    def delete_issue(self, key, delete_subtasks=False):
+        """Returns (status, data). Never raises -- 404 (already gone) is a
+        normal, expected outcome here, not an error.
+        """
+        path = "/rest/api/3/issue/{}".format(key)
+        if delete_subtasks:
+            path += "?deleteSubtasks=true"
+        return self.request_status("DELETE", path)
+
 
 def write_config(path, config):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -311,6 +398,61 @@ def read_config(path):
             return json.load(fh)
     except Exception:
         return {}
+
+
+def _parse_delete_keys(raw):
+    """Comma-separated, explicit issue keys only -- no wildcards, no "all
+    issues in project", no JQL. Blank entries (from a stray comma) are
+    dropped rather than treated as a key."""
+    return [k.strip() for k in raw.split(",") if k.strip()]
+
+
+def _first_key_outside_project(keys, project_key):
+    """Returns the first key that does not belong to project_key, or None if
+    every key does. Project scoping is absolute: the site also holds the
+    operator's real client work in other projects, so this check runs before
+    any network call at all -- a typo here must never be able to cascade.
+
+    Jira project keys cannot contain a hyphen, so splitting an issue key on
+    its first hyphen reliably recovers the project key it belongs to.
+    """
+    for key in keys:
+        prefix = key.split("-", 1)[0] if "-" in key else key
+        if prefix != project_key:
+            return key
+    return None
+
+
+def _leaves_first_order(admin, keys):
+    """Partition keys into (has-parent, parentless), preserving each key's
+    relative input order within its group, and return has-parent first.
+
+    This is deliberately not a full topological sort by depth -- the
+    requirement is only that a parent (e.g. an Epic) is never deleted before
+    a child that still references it, whether or not Jira cascades an Epic
+    delete on its own. Checking "does this issue currently have a parent" and
+    ordering on that boolean is sufficient for that, and doesn't require the
+    operator to pass keys in any particular order.
+    """
+    with_parent, without_parent = [], []
+    for key in keys:
+        target = with_parent if admin.get_issue_parent(key) else without_parent
+        target.append(key)
+    return with_parent + without_parent
+
+
+def _delete_error_message(data):
+    """Best-effort human-readable message from a Jira error body, without
+    ever touching the token or auth header -- those never appear in a
+    response body, so this is safe by construction, not by omission."""
+    data = _as_dict(data)
+    messages = _as_list(data.get("errorMessages"))
+    if messages:
+        return "; ".join(str(m) for m in messages)
+    errors = _as_dict(data.get("errors"))
+    if errors:
+        return "; ".join("{}: {}".format(k, v) for k, v in errors.items())
+    return json.dumps(data) if data else "(no error body)"
 
 
 def _admin_from_env():
@@ -349,6 +491,15 @@ def main(argv=None):
 
     p_close = sub.add_parser("sprint-close")
     p_close.add_argument("--id", required=True)
+
+    p_delete = sub.add_parser("delete-issues")
+    p_delete.add_argument("--keys", required=True,
+                          help="comma-separated, explicit issue keys -- no wildcards, no JQL")
+    p_delete.add_argument("--confirm", action="store_true",
+                          help="without this, runs as a dry run and deletes nothing")
+    p_delete.add_argument("--delete-subtasks", action="store_true",
+                          help="append deleteSubtasks=true; only use after a delete fails "
+                               "with a message about subtasks")
 
     args = parser.parse_args(argv)
     admin = _admin_from_env()
@@ -402,12 +553,111 @@ def main(argv=None):
             admin.close_sprint(args.id)
             print("sprint {} closed".format(args.id))
             return 0
+
+        if args.command == "delete-issues":
+            return _run_delete_issues(admin, config, args)
     except urllib.error.HTTPError as e:
         print("Jira API error {} on {}: {}".format(e.code, args.command, e.read().decode()[:500]),
               file=sys.stderr)
         return 2
 
     return 1
+
+
+# Exit codes for delete-issues, distinct from the discover/ensure-project
+# codes above (2 HTTP error, 3 missing 'To Do', 4 incomplete transition map,
+# 5 no status gated) so a caller can tell these failure modes apart.
+DELETE_EXIT_KEY_OUTSIDE_PROJECT = 6
+DELETE_EXIT_ROUTE_MOVED = 7
+DELETE_EXIT_ROUTE_FORBIDDEN = 8
+DELETE_EXIT_ROUTE_UNEXPECTED = 9
+DELETE_EXIT_SOME_DELETIONS_FAILED = 10
+
+
+def _run_delete_issues(admin, config, args):
+    """Implements `delete-issues`. See the module docstring's Usage section
+    and the class comment above JiraAdmin's "-- deletion --" methods for the
+    reasoning; this function is just the CLI-level sequencing:
+
+      1. parse + validate --keys are all in-project (no network yet)
+      2. compute the leaves-first delete order (GET only, safe in dry run)
+      3. dry run: report the plan and stop
+      4. --confirm: probe the route once, then delete in that order
+    """
+    keys = _parse_delete_keys(args.keys)
+    if not keys:
+        print("ERROR: --keys must list at least one issue key.", file=sys.stderr)
+        return 1
+
+    project_key = config.get("projectKey")
+    if not project_key:
+        print("no projectKey in {} -- run `discover` first".format(CONFIG_PATH),
+              file=sys.stderr)
+        return 1
+
+    bad_key = _first_key_outside_project(keys, project_key)
+    if bad_key:
+        print(
+            "\nERROR: '{}' does not belong to project '{}' -- aborting before deleting\n"
+            "anything. Project scoping here is absolute: this site also holds the\n"
+            "operator's real client work in other projects, and a typo in --keys must\n"
+            "never be able to reach it.\n"
+            "Keys given: {}\n".format(bad_key, project_key, ", ".join(keys)),
+            file=sys.stderr)
+        return DELETE_EXIT_KEY_OUTSIDE_PROJECT
+
+    order = _leaves_first_order(admin, keys)
+
+    if not args.confirm:
+        print("DRY RUN -- no issues will be deleted (pass --confirm to actually delete).")
+        print("Planned order (leaves first, so a parent is never removed before its "
+              "children):")
+        for i, key in enumerate(order, 1):
+            print("  {}. {}".format(i, key))
+        return 0
+
+    probe_status = admin.probe_delete_route(project_key)
+    if probe_status == 404:
+        pass  # route exists and we're authorised -- proceed
+    elif probe_status in (405, 410):
+        print(
+            "\nERROR: the delete route probe returned {}. That means the endpoint has\n"
+            "moved or been removed -- exactly like /rest/api/3/search's removal (410)\n"
+            "silently broke `discover` until it was repointed at /search/jql. Aborting\n"
+            "before deleting anything; re-verify the current delete endpoint before\n"
+            "retrying.\n".format(probe_status),
+            file=sys.stderr)
+        return DELETE_EXIT_ROUTE_MOVED
+    elif probe_status in (401, 403):
+        print(
+            "\nERROR: the delete route probe returned {} -- a permissions problem, not a\n"
+            "route problem. Aborting before deleting anything.\n".format(probe_status),
+            file=sys.stderr)
+        return DELETE_EXIT_ROUTE_FORBIDDEN
+    else:
+        print(
+            "\nERROR: the delete route probe returned unexpected status {} (expected 404\n"
+            "for a nonexistent key). Aborting rather than assume it's safe to proceed.\n"
+            .format(probe_status),
+            file=sys.stderr)
+        return DELETE_EXIT_ROUTE_UNEXPECTED
+
+    failures = 0
+    for key in order:
+        status, data = admin.delete_issue(key, delete_subtasks=args.delete_subtasks)
+        if status in (200, 202, 204):
+            print("{} {}: deleted".format(key, status))
+        elif status == 404:
+            print("{} {}: already gone, skipped".format(key, status))
+        else:
+            failures += 1
+            message = _delete_error_message(data)
+            hint = ""
+            if "subtask" in message.lower() and not args.delete_subtasks:
+                hint = " Re-run with --delete-subtasks if this issue has subtasks."
+            print("{} {}: FAILED -- {}{}".format(key, status, message, hint), file=sys.stderr)
+
+    return DELETE_EXIT_SOME_DELETIONS_FAILED if failures else 0
 
 
 def _fail_if_required_status_missing(config):

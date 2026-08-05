@@ -1,6 +1,7 @@
 """Bootstrap uses stdlib urllib so hooks and scripts share a zero-dependency
 runtime. Tests stub the transport rather than the network.
 """
+import io
 import json
 import os
 import sys
@@ -628,3 +629,306 @@ def test_missing_credentials_exits_nonzero_without_prompting(monkeypatch, capsys
     code = jira_bootstrap.main(["discover"])
     assert code != 0
     assert "JIRA_API_TOKEN" in capsys.readouterr().err
+
+
+# -- delete-issues -----------------------------------------------------------
+#
+# The Atlassian MCP has no delete capability, so smoke-test issues in the
+# operator's dedicated test project accumulate with no cleanup path. This
+# subcommand is the admin-plane escape hatch, and its safety rails (explicit
+# keys only, absolute project scoping, a route probe before any real delete,
+# leaves-first ordering, 404-is-not-a-failure) are all exercised below through
+# JiraAdmin.transport_status -- no network I/O, and the script is never run
+# against a real site.
+
+class FakeStatusTransport:
+    """Same idea as FakeTransport above, but for JiraAdmin.transport_status:
+    each stubbed response is a (status, data) tuple rather than just data,
+    mirroring what request_status/_http_with_status actually return."""
+
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls = []
+
+    def __call__(self, method, url, body, headers):
+        self.calls.append((method, url, body))
+        path = urllib.parse.urlsplit(url).path
+        for key, value in self.responses.items():
+            verb, stub_path = key.split(" ", 1)
+            if method == verb and path == stub_path:
+                return value
+        raise AssertionError("unstubbed status request: {} {}".format(method, url))
+
+
+def admin_for_delete(responses):
+    a = jira_bootstrap.JiraAdmin("example.atlassian.net", "me@example.com", "super-secret-token")
+    a.transport_status = FakeStatusTransport(responses)
+    return a
+
+
+class DeleteArgs:
+    """Stand-in for the argparse.Namespace `delete-issues` produces -- only
+    the three attributes _run_delete_issues actually reads."""
+
+    def __init__(self, keys, confirm=False, delete_subtasks=False):
+        self.keys = keys
+        self.confirm = confirm
+        self.delete_subtasks = delete_subtasks
+
+
+def _delete_calls(a, real_only=True):
+    calls = [urllib.parse.urlsplit(u).path for m, u, _ in a.transport_status.calls if m == "DELETE"]
+    return [c for c in calls if not c.endswith("999999")] if real_only else calls
+
+
+def test_delete_issues_aborts_when_key_outside_project(capsys):
+    """A typo (or a key from the operator's real client project) must abort
+    the whole run before a single DELETE is issued -- no responses are
+    stubbed at all, so any request would raise as unstubbed."""
+    a = admin_for_delete({})
+    code = jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"}, DeleteArgs(keys="AGENT-2,OTHER-9,AGENT-1", confirm=True))
+    assert code == jira_bootstrap.DELETE_EXIT_KEY_OUTSIDE_PROJECT
+    assert "OTHER-9" in capsys.readouterr().err
+    assert a.transport_status.calls == []
+
+
+def test_first_key_outside_project_rejects_prefix_collisions():
+    """A startswith/substring check would let 'AGENTX-1' pass for project
+    'AGENT' -- it must not."""
+    assert jira_bootstrap._first_key_outside_project(["AGENTX-1"], "AGENT") == "AGENTX-1"
+    assert jira_bootstrap._first_key_outside_project(["AGENT-1", "AGENT-2"], "AGENT") is None
+
+
+def test_delete_issues_dry_run_reports_order_and_deletes_nothing(capsys):
+    a = admin_for_delete({
+        "GET /rest/api/3/issue/AGENT-1": (200, {"fields": {}}),
+        "GET /rest/api/3/issue/AGENT-2": (200, {"fields": {"parent": {"key": "AGENT-1"}}}),
+    })
+    code = jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"}, DeleteArgs(keys="AGENT-1,AGENT-2", confirm=False))
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "DRY RUN" in out
+    assert "AGENT-1" in out and "AGENT-2" in out
+    assert not any(m == "DELETE" for m, _, _ in a.transport_status.calls)
+
+
+def test_delete_issues_route_probe_aborts_on_405(capsys):
+    a = admin_for_delete({
+        "GET /rest/api/3/issue/AGENT-1": (200, {"fields": {}}),
+        "DELETE /rest/api/3/issue/AGENT-999999": (405, {}),
+    })
+    code = jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"}, DeleteArgs(keys="AGENT-1", confirm=True))
+    assert code == jira_bootstrap.DELETE_EXIT_ROUTE_MOVED
+    assert "moved or been removed" in capsys.readouterr().err
+    assert _delete_calls(a) == []
+
+
+def test_delete_issues_route_probe_aborts_on_410(capsys):
+    a = admin_for_delete({
+        "GET /rest/api/3/issue/AGENT-1": (200, {"fields": {}}),
+        "DELETE /rest/api/3/issue/AGENT-999999": (410, {}),
+    })
+    code = jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"}, DeleteArgs(keys="AGENT-1", confirm=True))
+    assert code == jira_bootstrap.DELETE_EXIT_ROUTE_MOVED
+    assert _delete_calls(a) == []
+
+
+def test_delete_issues_route_probe_aborts_on_403():
+    a = admin_for_delete({
+        "GET /rest/api/3/issue/AGENT-1": (200, {"fields": {}}),
+        "DELETE /rest/api/3/issue/AGENT-999999": (403, {}),
+    })
+    code = jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"}, DeleteArgs(keys="AGENT-1", confirm=True))
+    assert code == jira_bootstrap.DELETE_EXIT_ROUTE_FORBIDDEN
+    assert _delete_calls(a) == []
+
+
+def test_delete_issues_route_probe_proceeds_on_404():
+    a = admin_for_delete({
+        "GET /rest/api/3/issue/AGENT-1": (200, {"fields": {}}),
+        "DELETE /rest/api/3/issue/AGENT-999999": (404, {}),
+        "DELETE /rest/api/3/issue/AGENT-1": (204, {}),
+    })
+    code = jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"}, DeleteArgs(keys="AGENT-1", confirm=True))
+    assert code == 0
+    assert _delete_calls(a) == ["/rest/api/3/issue/AGENT-1"]
+
+
+def test_delete_issues_orders_leaves_before_parent():
+    """Keys given parent-first (the Epic, then its child) must still be
+    deleted children-first -- ordering is derived from each issue's current
+    `parent`, never from the order the operator happened to type keys in."""
+    a = admin_for_delete({
+        "GET /rest/api/3/issue/AGENT-1": (200, {"fields": {}}),  # the parent/Epic
+        "GET /rest/api/3/issue/AGENT-2": (200, {"fields": {"parent": {"key": "AGENT-1"}}}),
+        "DELETE /rest/api/3/issue/AGENT-999999": (404, {}),
+        "DELETE /rest/api/3/issue/AGENT-1": (204, {}),
+        "DELETE /rest/api/3/issue/AGENT-2": (204, {}),
+    })
+    code = jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"}, DeleteArgs(keys="AGENT-1,AGENT-2", confirm=True))
+    assert code == 0
+    assert _delete_calls(a) == ["/rest/api/3/issue/AGENT-2", "/rest/api/3/issue/AGENT-1"]
+
+
+def test_delete_issues_reports_404_as_already_gone_not_a_failure():
+    a = admin_for_delete({
+        "GET /rest/api/3/issue/AGENT-1": (200, {"fields": {}}),
+        "DELETE /rest/api/3/issue/AGENT-999999": (404, {}),
+        "DELETE /rest/api/3/issue/AGENT-1": (404, {}),
+    })
+    code = jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"}, DeleteArgs(keys="AGENT-1", confirm=True))
+    assert code == 0
+
+
+def test_delete_issues_reports_404_already_gone_in_output(capsys):
+    a = admin_for_delete({
+        "GET /rest/api/3/issue/AGENT-1": (200, {"fields": {}}),
+        "DELETE /rest/api/3/issue/AGENT-999999": (404, {}),
+        "DELETE /rest/api/3/issue/AGENT-1": (404, {}),
+    })
+    jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"}, DeleteArgs(keys="AGENT-1", confirm=True))
+    assert "already gone" in capsys.readouterr().out
+
+
+def test_delete_issues_real_failure_exits_nonzero_and_hints_delete_subtasks(capsys):
+    a = admin_for_delete({
+        "GET /rest/api/3/issue/AGENT-1": (200, {"fields": {}}),
+        "DELETE /rest/api/3/issue/AGENT-999999": (404, {}),
+        "DELETE /rest/api/3/issue/AGENT-1": (400, {"errorMessages": ["The issue has subtasks."]}),
+    })
+    code = jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"}, DeleteArgs(keys="AGENT-1", confirm=True))
+    assert code == jira_bootstrap.DELETE_EXIT_SOME_DELETIONS_FAILED
+    err = capsys.readouterr().err
+    assert "subtasks" in err.lower()
+    assert "--delete-subtasks" in err
+
+
+def test_delete_issues_does_not_send_delete_subtasks_param_by_default():
+    a = admin_for_delete({
+        "GET /rest/api/3/issue/AGENT-1": (200, {"fields": {}}),
+        "DELETE /rest/api/3/issue/AGENT-999999": (404, {}),
+        "DELETE /rest/api/3/issue/AGENT-1": (204, {}),
+    })
+    jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"}, DeleteArgs(keys="AGENT-1", confirm=True))
+    real_delete_urls = [u for m, u, _ in a.transport_status.calls
+                        if m == "DELETE" and u.endswith("/issue/AGENT-1")]
+    assert real_delete_urls and "deleteSubtasks" not in real_delete_urls[0]
+
+
+def test_delete_issues_delete_subtasks_flag_appends_query_param():
+    a = admin_for_delete({
+        "GET /rest/api/3/issue/AGENT-1": (200, {"fields": {}}),
+        "DELETE /rest/api/3/issue/AGENT-999999": (404, {}),
+        "DELETE /rest/api/3/issue/AGENT-1": (204, {}),
+    })
+    jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"},
+        DeleteArgs(keys="AGENT-1", confirm=True, delete_subtasks=True))
+    real_delete_urls = [u for m, u, _ in a.transport_status.calls
+                        if m == "DELETE" and "/issue/AGENT-1" in u]
+    assert any("deleteSubtasks=true" in u for u in real_delete_urls)
+
+
+def test_delete_issues_output_never_contains_the_token(capsys):
+    a = admin_for_delete({
+        "GET /rest/api/3/issue/AGENT-1": (200, {"fields": {}}),
+        "DELETE /rest/api/3/issue/AGENT-999999": (404, {}),
+        "DELETE /rest/api/3/issue/AGENT-1": (204, {}),
+    })
+    jira_bootstrap._run_delete_issues(
+        a, {"projectKey": "AGENT"}, DeleteArgs(keys="AGENT-1", confirm=True))
+    out, err = capsys.readouterr()
+    assert "super-secret-token" not in out
+    assert "super-secret-token" not in err
+
+
+def test_main_delete_issues_dry_run_end_to_end(monkeypatch, tmp_path, capsys):
+    """Wires argparse -> config read -> _run_delete_issues through main()."""
+    monkeypatch.setenv("JIRA_SITE", "example.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "me@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "tok")
+    config_path = tmp_path / "jira-config.json"
+    jira_bootstrap.write_config(str(config_path), {"projectKey": "AGENT"})
+    monkeypatch.setattr(jira_bootstrap, "CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(jira_bootstrap.JiraAdmin, "get_issue_parent", lambda self, key: None)
+
+    code = jira_bootstrap.main(["delete-issues", "--keys", "AGENT-1,AGENT-2"])
+    assert code == 0
+    assert "DRY RUN" in capsys.readouterr().out
+
+
+def test_main_delete_issues_exits_distinctly_when_key_outside_project(monkeypatch, tmp_path):
+    monkeypatch.setenv("JIRA_SITE", "example.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "me@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "tok")
+    config_path = tmp_path / "jira-config.json"
+    jira_bootstrap.write_config(str(config_path), {"projectKey": "AGENT"})
+    monkeypatch.setattr(jira_bootstrap, "CONFIG_PATH", str(config_path))
+
+    code = jira_bootstrap.main(["delete-issues", "--keys", "OTHER-1", "--confirm"])
+    assert code == jira_bootstrap.DELETE_EXIT_KEY_OUTSIDE_PROJECT
+
+
+# -- _http_with_status (the real, non-stubbed transport) ---------------------
+
+class _FakeHTTPResponse:
+    def __init__(self, status, body=b""):
+        self.status = status
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_http_with_status_handles_204_empty_body(monkeypatch):
+    """The concrete bug called out in the task: json.loads("") raises, so a
+    204 with no body must be special-cased rather than parsed blindly."""
+    monkeypatch.setattr(
+        jira_bootstrap.urllib.request, "urlopen",
+        lambda req, timeout=30: _FakeHTTPResponse(204, b""))
+    status, data = jira_bootstrap._http_with_status(
+        "DELETE", "https://example.atlassian.net/rest/api/3/issue/AGENT-1", None, {})
+    assert status == 204
+    assert data == {}
+
+
+def test_http_with_status_returns_code_and_body_on_http_error(monkeypatch):
+    def fake_urlopen(req, timeout=30):
+        raise urllib.error.HTTPError(
+            req.full_url, 404, "Not Found", hdrs=None,
+            fp=io.BytesIO(b'{"errorMessages":["Issue does not exist"]}'))
+    monkeypatch.setattr(jira_bootstrap.urllib.request, "urlopen", fake_urlopen)
+    status, data = jira_bootstrap._http_with_status(
+        "DELETE", "https://example.atlassian.net/rest/api/3/issue/AGENT-999999", None, {})
+    assert status == 404
+    assert data["errorMessages"] == ["Issue does not exist"]
+
+
+def test_http_with_status_does_not_raise_on_a_4xx_unlike_http(monkeypatch):
+    """Pins the contract distinction the Transport note draws: `_http` (used
+    by every existing caller) still raises on non-2xx; `_http_with_status`
+    (used only by delete-issues) must not."""
+    def fake_urlopen(req, timeout=30):
+        raise urllib.error.HTTPError(
+            req.full_url, 405, "Method Not Allowed", hdrs=None, fp=io.BytesIO(b""))
+    monkeypatch.setattr(jira_bootstrap.urllib.request, "urlopen", fake_urlopen)
+    status, data = jira_bootstrap._http_with_status("DELETE", "https://example.atlassian.net/x", None, {})
+    assert status == 405
+    assert data == {}
