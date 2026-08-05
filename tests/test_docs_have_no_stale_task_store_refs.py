@@ -23,6 +23,7 @@ DOCS = [
     # Not agent-facing, but documents the hook payload/event names directly --
     # just as prone to drifting stale after a migration as the agent docs.
     "SECURITY.md",
+    "commands/optimize-my-claude.md",
 ]
 
 STALE = re.compile(r"\bTaskCreate\b|\bTaskUpdate\b|\bTaskList\b|\bTaskGet\b|tasks\.md"
@@ -40,6 +41,7 @@ MIGRATED = [
     ".claude/skills/documentation/SKILL.md",
     "commands/brainstorm.md",
     "SECURITY.md",
+    "commands/optimize-my-claude.md",
 ]
 
 TEAMMATES = [
