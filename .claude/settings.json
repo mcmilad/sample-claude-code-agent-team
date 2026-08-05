@@ -38,7 +38,26 @@
     }
   },
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/spec_gate.py\" prompt"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/spec_gate.py\" write"
+          }
+        ]
+      },
       {
         "matcher": "mcp__plugin_atlassian_atlassian__createJiraIssue",
         "hooks": [
