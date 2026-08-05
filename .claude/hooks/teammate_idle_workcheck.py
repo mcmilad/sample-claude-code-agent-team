@@ -29,6 +29,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from team_hook_common import (  # noqa: E402
     read_payload, allow, block, audit, role_of_teammate, nudge_dir,
+    safe_path_component,
 )
 import jira_mirror  # noqa: E402
 
@@ -37,7 +38,12 @@ MAX_NUDGES = 2
 
 
 def _state_path(team, teammate):
-    safe = "{}__{}".format(team, teammate).replace("/", "_")
+    # Both fields are attacker-influenceable (Threat Model SS6) and this path is
+    # passed to os.remove() below, so each component is independently reduced
+    # to a single safe path component -- same discipline as the verify gate's
+    # sentinel_path() -- rather than a bare .replace("/", "_") on the joined
+    # string, which left every other unsafe character (e.g. "..") untouched.
+    safe = safe_path_component(team) + "__" + safe_path_component(teammate)
     return os.path.join(nudge_dir(), safe + ".json")
 
 

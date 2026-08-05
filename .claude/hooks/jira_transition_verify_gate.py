@@ -95,9 +95,11 @@ def main():
         block(EVENT, p, (
             "Transition of {} to '{}' blocked by the verification gate: no sentinel at\n"
             "  {}\n\n"
-            "Run the issue's `Run:` command, then attest:\n"
+            "Attest, then retry -- whichever applies to you: if you ran this issue's "
+            "`Run:` command, attest that it passed; if you are the reviewer closing after "
+            "a PASS verdict, attest that verdict instead.\n"
             "  mkdir -p {}\n"
-            "  echo '<the Run command> PASSED' > {}\n\n"
+            "  echo '<what you attested> PASSED' > {}\n\n"
             "If this issue genuinely has no runnable verification, ask the lead to add "
             "the skip-verify label."
         ).format(issue_key, target, path, os.path.dirname(path), path))

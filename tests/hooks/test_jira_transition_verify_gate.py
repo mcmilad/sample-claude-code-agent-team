@@ -62,6 +62,24 @@ def test_blocks_done_without_sentinel(tmp_path):
     assert run_hook(env, transition_id="41").returncode == 2
 
 
+def test_block_message_covers_both_the_implementer_and_reviewer_case(tmp_path):
+    """Transitions are any->any (no workflow ordering in a team-managed project),
+    so an implementer can go To Do -> Done directly and a reviewer can hit this
+    same block while closing after a PASS verdict. The message must not assume
+    either actor -- it must not tell a reviewer transitioning straight to Done
+    to go run the issue's `Run:` command, which they never ran. Covers both
+    routes to the same gated transition (41 = Done) since the message text does
+    not depend on which transition id triggered it."""
+    env, home = setup_env(tmp_path)
+    proc = run_hook(env, transition_id="41")  # e.g. To Do -> Done in one call
+    assert proc.returncode == 2
+    lower = proc.stderr.lower()
+    assert "run:` command" in lower or "run:" in lower  # implementer case
+    assert "reviewer" in lower and "verdict" in lower    # reviewer case
+    assert "mkdir -p" in proc.stderr
+    assert "skip-verify" in proc.stderr
+
+
 def test_allows_in_review_with_sentinel(tmp_path):
     env, home = setup_env(tmp_path)
     sentinel(home)

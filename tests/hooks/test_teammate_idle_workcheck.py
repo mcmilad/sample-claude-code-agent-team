@@ -12,6 +12,9 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HOOK = os.path.join(REPO, ".claude", "hooks", "teammate_idle_workcheck.py")
 
+sys.path.insert(0, os.path.join(REPO, ".claude", "hooks"))
+import teammate_idle_workcheck  # noqa: E402
+
 
 def setup_env(tmp_path):
     cfg = tmp_path / "jira-config.json"
@@ -103,3 +106,29 @@ def test_fails_open_on_garbage_payload(tmp_path):
     proc = subprocess.run([sys.executable, HOOK], input="not json",
                           capture_output=True, text=True, env=env)
     assert proc.returncode == 0
+
+
+def test_state_path_is_byte_identical_to_the_old_naive_join_for_legitimate_names():
+    """SECURITY.md claims the idle hook sanitises its nudge-state filename with
+    the same discipline as the sentinel path. The old implementation was just
+    `"{}__{}".format(team, teammate).replace("/", "_")` -- a bare replace that
+    left every other unsafe character untouched. Fixing it must not silently
+    reset the two-nudge loop guard for every team/teammate pair already on
+    disk, so for ordinary names the new path must resolve to exactly what the
+    old formula produced.
+    """
+    team, teammate = "jira-smoke", "coding-1"
+    old_formula = "{}__{}".format(team, teammate).replace("/", "_") + ".json"
+    new_path = teammate_idle_workcheck._state_path(team, teammate)
+    assert os.path.basename(new_path) == old_formula
+    assert new_path == os.path.join(teammate_idle_workcheck.nudge_dir(), old_formula)
+
+
+def test_state_path_crafted_component_cannot_escape_the_nudge_directory():
+    nudge_dir = teammate_idle_workcheck.nudge_dir()
+    path = teammate_idle_workcheck._state_path("../../../../tmp/evil", "../../etc/passwd")
+    assert os.path.dirname(path) == nudge_dir, \
+        "a crafted team/teammate must still resolve inside the nudge directory"
+    basename = os.path.basename(path)
+    assert ".." not in basename
+    assert os.sep not in basename
