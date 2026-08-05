@@ -6,6 +6,7 @@ import os
 import sys
 import urllib.error
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "scripts"))
@@ -508,6 +509,103 @@ def test_open_sprint_creates_then_starts():
     methods = [(m, u) for m, u, _ in a.transport.calls]
     assert methods[0][1].endswith("/rest/agile/1.0/sprint")
     assert "/sprint/42" in methods[1][1]
+
+
+def _parse_jira_iso(value):
+    """Jira emits/accepts ISO-8601 with milliseconds and a 'Z' zone, e.g.
+    2026-08-05T09:00:00.000Z. datetime.fromisoformat before 3.11 chokes on a
+    trailing 'Z', so swap it for an explicit UTC offset before parsing."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def test_open_sprint_activation_call_carries_state_start_and_end_dates():
+    """This is the bug: starting a sprint requires startDate and endDate on
+    the activation call, or Jira 400s with 'You must specify a start date'."""
+    a = admin({
+        "POST /rest/agile/1.0/sprint": {"id": 42, "name": "Group 1"},
+        "POST /rest/agile/1.0/sprint/42": {"id": 42, "state": "active"},
+    })
+    a.open_sprint(board_id=1, name="Group 1")
+    activation_body = json.loads(a.transport.calls[1][2])
+    assert activation_body["state"] == "active"
+    assert "startDate" in activation_body
+    assert "endDate" in activation_body
+    start = _parse_jira_iso(activation_body["startDate"])
+    end = _parse_jira_iso(activation_body["endDate"])
+    assert end > start
+
+
+def test_open_sprint_dates_are_iso8601_with_milliseconds_and_z():
+    a = admin({
+        "POST /rest/agile/1.0/sprint": {"id": 42, "name": "Group 1"},
+        "POST /rest/agile/1.0/sprint/42": {"id": 42, "state": "active"},
+    })
+    a.open_sprint(board_id=1, name="Group 1")
+    activation_body = json.loads(a.transport.calls[1][2])
+    import re
+    pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
+    assert re.match(pattern, activation_body["startDate"]), activation_body["startDate"]
+    assert re.match(pattern, activation_body["endDate"]), activation_body["endDate"]
+
+
+def test_open_sprint_days_argument_extends_end_date():
+    a_default = admin({
+        "POST /rest/agile/1.0/sprint": {"id": 42, "name": "Group 1"},
+        "POST /rest/agile/1.0/sprint/42": {"id": 42, "state": "active"},
+    })
+    a_default.open_sprint(board_id=1, name="Group 1")
+    default_body = json.loads(a_default.transport.calls[1][2])
+    default_start = _parse_jira_iso(default_body["startDate"])
+    default_end = _parse_jira_iso(default_body["endDate"])
+    assert (default_end - default_start) == timedelta(days=14)
+
+    a_custom = admin({
+        "POST /rest/agile/1.0/sprint": {"id": 43, "name": "Group 1"},
+        "POST /rest/agile/1.0/sprint/43": {"id": 43, "state": "active"},
+    })
+    a_custom.open_sprint(board_id=1, name="Group 1", days=1)
+    custom_body = json.loads(a_custom.transport.calls[1][2])
+    custom_start = _parse_jira_iso(custom_body["startDate"])
+    custom_end = _parse_jira_iso(custom_body["endDate"])
+    assert (custom_end - custom_start) == timedelta(days=1)
+    assert custom_end < default_end
+
+
+def test_open_sprint_creation_call_carries_no_dates():
+    """Pins the two-call split: creating a *future* sprint needs no dates, only
+    starting one does. A later refactor that merges the two calls (or leaks
+    dates onto the creation call) must fail this test."""
+    a = admin({
+        "POST /rest/agile/1.0/sprint": {"id": 42, "name": "Group 1"},
+        "POST /rest/agile/1.0/sprint/42": {"id": 42, "state": "active"},
+    })
+    a.open_sprint(board_id=1, name="Group 1")
+    creation_body = json.loads(a.transport.calls[0][2])
+    assert "startDate" not in creation_body
+    assert "endDate" not in creation_body
+    assert creation_body == {"name": "Group 1", "originBoardId": 1}
+
+
+def test_main_sprint_open_honours_days_argument(monkeypatch, tmp_path):
+    monkeypatch.setenv("JIRA_SITE", "example.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "me@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "tok")
+    config_path = tmp_path / "jira-config.json"
+    jira_bootstrap.write_config(str(config_path), {"boardId": 1})
+    monkeypatch.setattr(jira_bootstrap, "CONFIG_PATH", str(config_path))
+
+    captured = {}
+
+    def fake_open_sprint(self, board_id, name, days=14):
+        captured["board_id"] = board_id
+        captured["name"] = name
+        captured["days"] = days
+        return {"id": 42, "name": name}
+
+    monkeypatch.setattr(jira_bootstrap.JiraAdmin, "open_sprint", fake_open_sprint)
+    code = jira_bootstrap.main(["sprint-open", "--name", "Group 1", "--days", "7"])
+    assert code == 0
+    assert captured["days"] == 7
 
 
 def test_close_sprint_sets_closed_state():

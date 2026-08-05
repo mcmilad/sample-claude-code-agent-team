@@ -43,6 +43,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(REPO, ".claude", "jira-config.json")
@@ -76,6 +77,18 @@ def _as_dict(value):
 def _as_list(value):
     """Same idea as _as_dict, for list-shaped values."""
     return value if isinstance(value, list) else []
+
+
+def _jira_iso(dt):
+    """Format a UTC datetime as the ISO-8601 shape Jira's sprint API expects:
+    milliseconds and a literal 'Z' zone, e.g. 2026-08-05T09:00:00.000Z.
+
+    `dt.isoformat()` does NOT produce this on its own -- it emits microsecond
+    precision (6 digits, or none at all when they're zero) and a '+00:00'
+    offset rather than 'Z', so it must be formatted explicitly rather than
+    trusted as-is.
+    """
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + "{:03d}Z".format(dt.microsecond // 1000)
 
 
 def _http(method, url, body, headers):
@@ -257,11 +270,27 @@ class JiraAdmin:
 
     # -- sprints ---------------------------------------------------------
 
-    def open_sprint(self, board_id, name):
+    def open_sprint(self, board_id, name, days=14):
+        """Create a sprint, then start it.
+
+        Creating a *future* sprint needs no dates -- only transitioning it to
+        `active` does, and Jira 400s ("You must specify a start date for the
+        sprint.") without both startDate and endDate on that second call. The
+        two calls stay separate on purpose: the creation body must never carry
+        dates.
+
+        `days` is nominal, not a real cadence: a "sprint" here models a
+        parallel work group that may last minutes or hours, and the lead
+        closes it explicitly via sprint-close. The window only exists because
+        Jira's API requires an endDate to activate a sprint at all.
+        """
         sprint = self.request("POST", "/rest/agile/1.0/sprint",
                               {"name": name, "originBoardId": board_id})
+        start = datetime.now(timezone.utc)
+        end = start + timedelta(days=days)
         self.request("POST", "/rest/agile/1.0/sprint/{}".format(sprint["id"]),
-                     {"state": "active"})
+                     {"state": "active", "startDate": _jira_iso(start),
+                      "endDate": _jira_iso(end)})
         return sprint
 
     def close_sprint(self, sprint_id):
@@ -312,6 +341,11 @@ def main(argv=None):
 
     p_open = sub.add_parser("sprint-open")
     p_open.add_argument("--name", required=True)
+    # Nominal window, not a real cadence: a "sprint" here models a parallel
+    # work group that may last minutes, and the lead closes it explicitly via
+    # sprint-close. This only exists because Jira requires an endDate to
+    # activate a sprint at all -- don't read 14 as a planning decision.
+    p_open.add_argument("--days", type=int, default=14)
 
     p_close = sub.add_parser("sprint-close")
     p_close.add_argument("--id", required=True)
@@ -360,7 +394,7 @@ def main(argv=None):
                 print("no boardId in {} -- run `discover` first".format(CONFIG_PATH),
                       file=sys.stderr)
                 return 1
-            sprint = admin.open_sprint(board_id, args.name)
+            sprint = admin.open_sprint(board_id, args.name, days=args.days)
             print(json.dumps({"id": sprint["id"], "name": sprint.get("name")}))
             return 0
 
