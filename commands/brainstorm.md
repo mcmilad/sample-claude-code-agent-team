@@ -42,6 +42,6 @@ Project idea: $ARGUMENTS
 7. **Offer next steps** — Offer to scaffold the full spec structure to continue into the build phase:
    - `spec.md` — design decisions, constraints, alternatives considered
    - `design.md` — architecture, repository structure, infrastructure design
-   - `tasks.md` — parallelized task groups with agent assignments
+   - `jira-run.json` — Epic key and per-group sprint ids (the backlog itself lives in Jira, not a local file)
 
    This feeds directly into the spec-driven workflow defined in the `spec-workflow` skill.
