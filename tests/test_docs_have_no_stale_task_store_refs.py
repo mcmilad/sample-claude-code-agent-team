@@ -20,6 +20,9 @@ DOCS = [
     ".claude/skills/documentation/SKILL.md",
     # Agent-facing: a slash command the lead runs during brainstorming.
     "commands/brainstorm.md",
+    # Not agent-facing, but documents the hook payload/event names directly --
+    # just as prone to drifting stale after a migration as the agent docs.
+    "SECURITY.md",
 ]
 
 STALE = re.compile(r"\bTaskCreate\b|\bTaskUpdate\b|\bTaskList\b|\bTaskGet\b|tasks\.md"
@@ -36,6 +39,7 @@ MIGRATED = [
     ".claude/skills/spec-workflow/SKILL.md",
     ".claude/skills/documentation/SKILL.md",
     "commands/brainstorm.md",
+    "SECURITY.md",
 ]
 
 TEAMMATES = [

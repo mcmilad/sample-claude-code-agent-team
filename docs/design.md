@@ -14,16 +14,16 @@ User -> fullstack-agent (plan) -> [coding-agent, devops-agent] (build in paralle
 
 | Agent | Responsibility | Model | Writes To |
 |-------|---------------|-------|-----------|
-| fullstack-agent | Architecture, planning, coordination | opus | spec.md, design.md, tasks.md, decisions.md |
+| fullstack-agent | Architecture, planning, coordination | opus | spec.md, design.md, decisions.md, Jira issues |
 | coding-agent | Application code and tests | sonnet | Source code, test files |
 | devops-agent | Infrastructure, CI/CD, containers, docs | sonnet | IaC files, CI configs, READMEs |
-| review-agent | Code review and quality verification | opus | review.md only |
+| review-agent | Code review and quality verification | opus | Jira comments only (the review verdict, posted on the sprint's `role-review` issue) |
 | sa-agent | Well-Architected reviews (on-demand) | opus | sa-review.md |
 
 ## Coordination Model
 
 Agents coordinate through two mechanisms:
-1. **Shared task list** (`TaskCreate`/`TaskUpdate`/`TaskList`) — real-time status tracking
+1. **The Atlassian MCP** (issue create/claim/transition/comment) — the backlog lives in Jira, not a file; a local mirror journal (`~/.claude/logs/jira-mirror/`) gives the enforcement hooks read access to that state since a hook subprocess holds no OAuth token
 2. **Direct messaging** (`SendMessage`) — interface clarifications, blocker notifications, review handoffs
 
 The team lead owns the workflow lifecycle: spawning teammates (named background `Agent` instances in the session's implicit team), delegating work, monitoring progress, and cleanup (automatic at session end).

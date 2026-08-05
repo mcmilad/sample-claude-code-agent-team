@@ -332,10 +332,13 @@ the sprint's `role-review` issue, and it is the only role that may transition an
 `Done`. Self-review is a category error — grading your own homework defeats the gate.
 
 **Not machine-enforced.** The gate hook checks only that a sentinel exists — never the
-acting agent's identity nor the prior status — so an agent that writes a second sentinel
-can self-close. This is a protocol convention, not a guardrail (see `jira-workflow` →
-"Closing"). The observable tell is a `Done` transition with no synthesizer verdict
-comment; treat that as a review-gate violation the moment you see it.
+acting agent's identity nor the prior status — and Jira transitions in a team-managed
+project are any status to any status. So an implementer can transition `To Do` -> `Done`
+directly, in a single call, skipping `In Review` entirely; this is not a two-step
+workaround via a second sentinel, it takes one transition. This is a protocol convention,
+not a guardrail (see `jira-workflow` → "Closing"). The observable tell is a `Done`
+transition with no synthesizer verdict comment; treat that as a review-gate violation the
+moment you see it.
 
 Under parallel review there is still exactly **one** verdict per group, posted solely by the **synthesizer** reviewer; analyst reviewers post no verdict and only message findings to the synthesizer. Your job at the gate is to **read the synthesizer's single verdict comment**, not to compose or aggregate verdicts yourself — reading a reviewer-authored verdict is not authoring review content. If you ever find more than one verdict comment on the `role-review` issue, or one authored by an analyst or by yourself, the synthesizer invariant was violated: stop and re-run a clean synthesizer pass rather than trusting it.
 

@@ -58,19 +58,42 @@ This document provides a security overview of the Claude Code Multi-Agent Develo
 
 ### 6. Enforcement Hook Execution
 
-**Threat:** The agent-team enforcement hooks (`hooks/*.py`) are the only executable code in this repository. Claude Code invokes them automatically as local Python subprocesses on the `TaskCreated`, `TaskCompleted`, and `TeammateIdle` events, with a JSON payload delivered on stdin. The payload carries agent-influenceable fields (`team_name`, `task_id`, `task_subject`, `task_description`, `teammate_name`). Hook logic that consumed these fields unsafely could introduce a local code-execution or unauthorized-filesystem-modification path that executes outside Claude Code's tool-call permission prompts.
+**Threat:** The agent-team enforcement hooks (`.claude/hooks/*.py`) are the only executable code in this repository. Claude Code invokes them automatically as local Python subprocesses on the `PreToolUse`, `PostToolUse`, and `TeammateIdle` events, gated on the Atlassian MCP's Jira tools, with a JSON payload delivered on stdin. The payload carries agent-influenceable fields on `tool_input` (`summary`, `description`, `additional_fields`, `issueIdOrKey`, `transition.id`), plus `team_name`/`teammate_name` on the `TeammateIdle` payload. Hook logic that consumed these fields unsafely could introduce a local code-execution or unauthorized-filesystem-modification path that executes outside Claude Code's tool-call permission prompts.
 
 **Design properties** (verified in the bundled scripts):
 - **Fail-open by contract.** Every hook resolves any unexpected condition — empty/invalid payload, internal exception, missing state — to `allow` (exit 0). A hook bug can never roll back a valid task, block a legitimate completion, or trap a teammate. Enforcement is a guardrail, not a tripwire. The corollary users must accept: a crashing or tampered hook silently stops enforcing — the protocol degrades to unenforced, it does not hard-fail.
 - **No dynamic execution or shell-out.** The scripts use only the Python standard library. They perform no dynamic code evaluation, invoke no shell or external process, and do not reconstruct objects from the payload — input handling is limited to JSON parsing wrapped in `try/except`. This avoids the classic local code-execution sinks.
-- **Untrusted path components are sanitized.** The `TaskCompleted` gate derives a sentinel file path from `team_name` and `task_id`, then removes that file when verification passes. Both fields are passed through `safe_path_component()` (`team_hook_common.py`) — a basename reduction plus an `[A-Za-z0-9._-]` allowlist — so a crafted value such as `../../x` or `/etc/x` cannot traverse outside `~/.claude/logs/verified/`. The idle hook applies the same discipline to its nudge-state filename. Without this, an agent steered by prompt injection (Threat §4) could have induced deletion of `*.verified` files outside the intended directory.
+- **Untrusted path components are sanitized.** The verify gate (`PreToolUse` on `transitionJiraIssue`) derives a sentinel file path from `projectKey` and `issueIdOrKey`, then removes that file when verification passes. Both fields are passed through `safe_path_component()` (`team_hook_common.py`) — a basename reduction plus an `[A-Za-z0-9._-]` allowlist — so a crafted value such as `../../x` or `/etc/x` cannot traverse outside `~/.claude/logs/verified/`. The idle hook applies the same discipline to its nudge-state filename, sanitizing `team_name` and `teammate_name` independently before joining them. Without this, an agent steered by prompt injection (Threat §4) could have induced deletion of `*.verified`/nudge-state files outside the intended directory.
 - **Sentinel consumption.** A passing sentinel is deleted so it cannot be replayed to re-complete a task. The deletion target is constrained to the sanitized path above.
 
 **Mitigations** (require user configuration and ongoing verification):
-- Hook scripts execute with the user's own privileges, outside the tool-call permission prompts — users MUST review `hooks/*.py` before installing them, exactly as they would any code they run locally, and re-review on update
-- Hooks are wired via project-relative `$CLAUDE_PROJECT_DIR/hooks/...` paths in the bundled `settings.json`; users installing globally must point the commands at their trusted `~/.claude/hooks/` copy and ensure that directory is not writable by untrusted processes
+- Hook scripts execute with the user's own privileges, outside the tool-call permission prompts — users MUST review `.claude/hooks/*.py` before installing them, exactly as they would any code they run locally, and re-review on update
+- Hooks are wired via project-relative `$CLAUDE_PROJECT_DIR/.claude/hooks/...` paths in the bundled `.claude/settings.json`; users installing globally must point the commands at their trusted `~/.claude/hooks/` copy and ensure that directory is not writable by untrusted processes
 - All hook decisions (allow/block, with reason and payload) are appended to `~/.claude/logs/team-hooks.jsonl` — users can audit enforcement behavior there
 - Bypass tokens (`[skip-format-check]`, `[skip-verify]`) intentionally disable a check for a single task; users must treat their presence in a task as a reviewable signal, not boilerplate
+
+### 7. Jira Admin Credential Scope
+
+**Threat:** `JIRA_API_TOKEN`, used only by `scripts/jira_bootstrap.py`, acts with the operator's **full Jira permissions** — far beyond the Atlassian MCP's `read:jira-work`/`write:jira-work` OAuth grant that agents use at runtime. Every `Bash` tool call an agent runs is a child process of the shell that launched Claude Code, so a token exported into that shell is inherited by every agent subprocess in the session and readable via `env`, `printenv`, or any child process — a single second credential that, if mishandled, hands out far more than the MCP grant ever would.
+
+**Mitigations** (require user configuration and ongoing verification):
+- The one real confinement is *where the token is exported*: running `scripts/jira_bootstrap.py` (including the `sprint-open`/`sprint-close` admin-plane calls mid-run) from a terminal **separate** from the one that launches Claude Code keeps the token out of the agent session's environment entirely — see the README's [Jira setup](README.md#jira-setup-one-time) section
+- Beyond that, confinement is a convention plus an instruction, not a mechanism: `fullstack-agent` is told never to hold, echo, or pass on the token, and to be the only actor that would ever run bootstrap — nothing in the hooks or the harness checks or enforces this
+- If the token is ever exported into the Claude Code shell (or bootstrap is run through the lead instead of a separate terminal), users must treat it as exposed to every agent in the session and rotate/scope it accordingly
+
+### 8. Untrusted Content from Jira
+
+**Threat:** Issue descriptions and comments read via the Atlassian MCP may be authored by any third party with access to the Jira project, and flow directly into agent context whenever an agent reads an issue. This is the same class of risk as Threat §4 (MCP Server Trust) — untrusted external content reaching agent context as a prompt-injection vector — but the migration opens a new instance of it: Jira issue text is now a first-class, third-party-writable input to every teammate's working context, not just an MCP tool result.
+
+**Mitigations:** as Threat §4 — Claude Code's prompt-injection detection on tool results, and user review of flagged results. No hook in this repository inspects issue/comment text for injected instructions; that is out of scope for machine enforcement here.
+
+### 9. Review Gate Skippable via a Direct Transition (Known, Accepted Limitation)
+
+**Threat:** Jira transitions in a team-managed project are `isGlobal` — any status to any status, with no workflow ordering enforced by Jira itself. Combined with the verify-gate sentinel being self-attestation with no identity check (Threat §6), an implementer can transition an issue `To Do` -> `Done` **directly, in one call**, never entering `In Review` and never receiving independent review.
+
+This is accepted, not fixed. Gating `Done` on the mirror having shown `In Review` first was considered and rejected: the mirror (`jira_mirror_journal.py`) is a fail-open, best-effort local journal that can miss events, so making it a hard precondition would block legitimate closes whenever it missed a write — worse than the gap it would close.
+
+**Observable tell:** a `Done` transition with no synthesizer verdict comment on the sprint's `role-review` issue. Users and agents should treat that as a review-gate violation the moment it's seen — see the `jira-workflow` skill's "Closing" section.
 
 ## AI Security Controls
 
@@ -120,7 +143,7 @@ The agents rely on Claude models, which may reflect biases present in their trai
 
 ### Task Delegation and Review Processes
 
-Task delegation is deterministic — tasks are assigned by role prefix (`[coding]`, `[devops]`, `[sa]`) defined in `tasks.md` by the team lead. The `review-agent` applies the same review criteria to all code regardless of which agent produced it. There is no adaptive or learned behavior that could develop bias over time.
+Task delegation is deterministic — issues are assigned by the `role-*` label plus the matching `[role]` tag in the issue summary, enforced by the format-check hook at issue creation, not manually assigned by the team lead in a file. The `review-agent` applies the same review criteria to all code regardless of which agent produced it. There is no adaptive or learned behavior that could develop bias over time.
 
 ### Monitoring for Biased Outputs
 
@@ -169,7 +192,7 @@ Users MUST implement and maintain the following security controls. Failure to im
 - MCP server security review and approval — users must vet all MCP servers before adding them to `.mcp.json`
 - File system access controls and sensitive data protection — users must review and respond to Claude Code permission prompts
 - Production safety rule enforcement — users must not grant blanket approval for destructive operations
-- Enforcement hook review — users must read `hooks/*.py` before installing them and on every update (they run as local subprocesses with the user's privileges, outside the tool-call permission prompts), and keep the installed hook directory non-writable by untrusted processes
+- Enforcement hook review — users must read `.claude/hooks/*.py` before installing them and on every update (they run as local subprocesses with the user's privileges, outside the tool-call permission prompts), and keep the installed hook directory non-writable by untrusted processes
 - Ongoing verification that security controls remain correctly configured — users must periodically audit agent configurations and access policies
 
 ## AWS Shared Responsibility Model
@@ -211,7 +234,7 @@ Verify: `aws iam simulate-principal-policy --policy-source-arn arn:aws:iam::<acc
 
 Configure Claude Code permission settings to restrict file operations:
 - Review and set permission mode to limit automatic file access: `claude config set --project permissions.mode restricted`
-- Define allowed paths in agent task assignments via `tasks.md` file path column
+- Define allowed paths in agent task assignments via each Jira issue's `Files:` section
 - Verify: `git diff --name-only` lists only files assigned in the agent's task scope (expect: 100% match with task assignments)
 - Audit: review-agent checks modified files against task scope each review cycle
 
@@ -241,8 +264,11 @@ Each phase must be verified before proceeding to the next:
 | Hardcoded secrets in generated code | Medium | High | review-agent security checks + pr-review-toolkit plugin |
 | MCP server returns manipulated data | Low | Medium | Prompt injection detection + user-visible tool results |
 | Plugin accesses unintended data | Low | Low | Claude Code permission framework + marketplace-only plugins |
-| Enforcement hook path traversal via crafted `team_name`/`task_id` | Low | Medium | `safe_path_component()` basename + allowlist sanitization confines writes/deletes to `~/.claude/logs/verified/` |
-| Tampered/crashing enforcement hook stops enforcing silently | Low | Medium | Fail-open by design + all decisions audited to `team-hooks.jsonl` + user review of `hooks/*.py` before install |
+| Enforcement hook path traversal via crafted `projectKey`/`issueIdOrKey` or `team_name`/`teammate_name` | Low | Medium | `safe_path_component()` basename + allowlist sanitization confines writes/deletes to `~/.claude/logs/verified/` and `~/.claude/logs/idle-nudges/` |
+| Tampered/crashing enforcement hook stops enforcing silently | Low | Medium | Fail-open by design + all decisions audited to `team-hooks.jsonl` + user review of `.claude/hooks/*.py` before install |
+| `JIRA_API_TOKEN` exported into the Claude Code shell is inherited by every agent `Bash` subprocess | Medium | High | Separate-terminal export (README Jira setup) is the one real mechanism; otherwise convention + instruction only |
+| Untrusted issue/comment content from Jira reaches agent context (prompt injection) | Medium | Medium | Same as MCP Server Trust (Threat §4) — Claude Code's prompt-injection detection + user review of flagged results |
+| Review gate skipped via a direct `To Do` -> `Done` transition (no `In Review`) | Low | Medium | Accepted, documented limitation (Threat §9); observable tell is a `Done` transition with no synthesizer verdict comment |
 
 ### Compliance Risks
 

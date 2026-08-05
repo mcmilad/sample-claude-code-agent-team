@@ -28,6 +28,14 @@ WATCHED = (CREATE, TRANSITION, EDIT, COMMENT)
 
 _ERROR_KEYS = ("error", "errors", "errorMessages")
 
+# Verified live against a real Jira site: the harness
+# delivers tool_response as a list of content blocks --
+# [{"type": "text", "text": "<issue JSON as a string>"}] -- not the bare MCP
+# result object. That is the confirmed, primary shape for createJiraIssue
+# responses. The `isinstance(response, dict)` branches in _succeeded/_created_key
+# below are a fallback for a bare-object shape this repo has not observed live,
+# kept in case the harness ever changes what it hands back.
+
 
 def _parse_content_block_object(response):
     """Extract the first JSON object embedded in a content-block list.

@@ -160,6 +160,17 @@ class JiraAdmin:
         # here ever used `startAt` -- a single page of up to 50 issues is the
         # deliberate cap (see the docstring above), not partial results to
         # page through.
+        #
+        # Verified live against a real Jira site: transitions in a team-managed
+        # ("next-gen") Scrum project are isGlobal -- any status to any status,
+        # with no workflow ordering restricting which targets a given status can
+        # reach. So a single issue's transitions already enumerate the complete
+        # id -> target-name map; the per-status union below is defensive (it
+        # still holds if a site is configured with a non-global workflow) rather
+        # than load-bearing. This is also why the setup instructions only say
+        # "create the first few issues" and never "walk an issue through every
+        # status by hand": on this project type, any one existing issue is
+        # enough for `discover` to see every transition.
         transitions = {}
         probe = self.request(
             "GET", "/rest/api/3/search/jql?jql=project%3D{}&maxResults=50&fields=status".format(

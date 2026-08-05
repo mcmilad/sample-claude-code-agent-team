@@ -144,9 +144,12 @@ echo "review verdict PASS" > ~/.claude/logs/verified/<projectKey>/<ISSUE-KEY>.ve
 Without it the `Done` transition is blocked and the issue can never close.
 
 **Not enforced.** The gate hook checks only that a sentinel exists — not who is
-transitioning, nor what the prior status was. This is a protocol convention, not a
-guardrail: an agent that writes a second sentinel can self-close. Treat a `Done`
-transition with no synthesizer verdict comment as a review-gate violation.
+transitioning, nor what the prior status was — and Jira transitions in a team-managed
+project are any status to any status. So an implementer can transition `To Do` -> `Done`
+directly, in a single call, skipping `In Review` entirely; this is not a two-step
+workaround via a second sentinel, it takes one transition. This is a protocol convention,
+not a guardrail. Treat a `Done` transition with no synthesizer verdict comment as a
+review-gate violation.
 
 ## Label Vocabulary
 
