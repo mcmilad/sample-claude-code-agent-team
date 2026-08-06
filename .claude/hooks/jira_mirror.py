@@ -41,6 +41,43 @@ _MERGEABLE = ("summary", "labels", "status", "files")
 _DEFAULTS = {"summary": "", "labels": [], "status": "", "files": []}
 
 
+def _fresh_defaults():
+    """A defaults dict whose mutable values no other issue shares.
+
+    dict(_DEFAULTS) is a SHALLOW copy: every issue in the folded state would
+    hold the *same* labels list and the same files list, and one consumer doing
+    issue["labels"].append() would rewrite every other issue AND poison the
+    module-level default for the remaining life of the process -- handing every
+    later-folded issue a phantom agent-* claim. The dict literal this replaced
+    built fresh lists per call; keep that, without giving up _DEFAULTS as the
+    single place a new field is declared (see the note above _MERGEABLE).
+    """
+    return {k: list(v) if isinstance(v, list) else v for k, v in _DEFAULTS.items()}
+
+
+def normalize_path(path):
+    """Canonical form of a repo-relative path in the mirror's `files` list.
+
+    Both sides of every comparison must agree or the path drops out of the two
+    places declared paths are load-bearing -- jira_issue_format_check's overlap
+    check and claim_gate -- silently, for that file only. claim_gate compares
+    os.path.relpath() output, which is already normalised, so './src/a.py' or
+    'src//a.py' in an issue's `Files:` matched nothing. Applied on READ as well
+    as on write: the journal is never versioned, migrated or rotated, so live
+    journals still hold entries recorded in their raw form.
+
+    Best-effort like everything here: an unusable value normalises to '', which
+    callers drop, rather than raising into a hook's fail-open handler.
+    """
+    try:
+        s = str(path or "").strip()
+        if not s:
+            return ""
+        return os.path.normpath(s)
+    except Exception:
+        return ""
+
+
 def load_config(path=None):
     """Read the Jira config. Returns {} if missing or unparseable.
 
@@ -112,7 +149,7 @@ def load_state(project_key):
         key = event.get("key")
         if not key:
             continue
-        issue = state.setdefault(key, dict(_DEFAULTS))
+        issue = state.setdefault(key, _fresh_defaults())
         for field in _MERGEABLE:
             if event.get(field) is not None:
                 issue[field] = event[field]

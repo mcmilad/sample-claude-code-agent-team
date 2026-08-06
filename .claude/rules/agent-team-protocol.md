@@ -10,8 +10,26 @@ Shared protocol for all agent team teammates. The team lead (`fullstack-agent`) 
    `agent-*` label). **The claim is the `mkdir` lock, not the label** — `jira-workflow` has
    the full protocol, but these steps hold even with no skill loaded, and all of them
    happen *before* you edit any file:
-   1. `mkdir ~/.claude/logs/claims/<projectKey>/<ISSUE-KEY>` — succeeds for exactly one
-      agent. If it fails, you lost: pick another issue, touch nothing.
+   1. Take the lock. **Bootstrap the parent first** — a bare `mkdir` of the issue
+      directory fails with `ENOENT` on a fresh `$HOME`, which every copy of this recipe
+      reads as "you lost", so the whole pool loses and the board starves. Record `owner`
+      and `heartbeat` inside it: the lead's stale-claim sweep matches the `heartbeat`
+      **file** (`find … -name heartbeat`), so a lock without one is invisible to the only
+      thing that recovers your issue if you die mid-work.
+
+      ```bash
+      CLAIMS=~/.claude/logs/claims/<projectKey>; mkdir -p "$CLAIMS"
+      if mkdir "$CLAIMS/<ISSUE-KEY>" 2>/dev/null; then
+        echo "<your-instance>" > "$CLAIMS/<ISSUE-KEY>/owner"
+        date -u +%Y-%m-%dT%H:%M:%SZ > "$CLAIMS/<ISSUE-KEY>/heartbeat"
+      else
+        echo "LOST -- owned by $(cat "$CLAIMS/<ISSUE-KEY>/owner" 2>/dev/null)"
+      fi
+      ```
+
+      Only the **second** `mkdir` failing means you lost: pick another issue, touch
+      nothing. Never write `owner`/`heartbeat` unconditionally — on a lost race that
+      overwrites the winner's own record.
    2. `getJiraIssue(..., fields=["labels","status","summary","description","issuelinks"])`
       — an explicit `fields` list **replaces** the defaults, so it must include `labels`.
    3. `editJiraIssue` adding your `agent-*` label, then `transitionJiraIssue` to
@@ -159,7 +177,7 @@ Message delivery, idle pings, and the Jira/Atlassian MCP are all **laggy and occ
   Jira is unreachable, stall and escalate; do not invent state.
 - **Delivery lag ≠ death.** Messages routinely arrive delayed, batched, and out of order. "No message in N minutes" or "no OS process visible" is **not** evidence a teammate is stalled or dead — it is evidence the channel is quiet. Teammates running long verification passes (a multi-minute plugin review, an uncached test suite, a `terraform plan`) look identical to a dead one over the wire. Do not conclude a peer has failed from silence alone.
 - **Ignore stale replays silently.** If you receive a stale assignment (or re-assignment) message for an issue that is already `Done`, or for which a verification sentinel is already present on disk (proof that verification ran, even before the transition lands and consumes it), or for a key that `getJiraIssue` reports as "not found", treat it as a stale roll-forward artifact: take no action and do **not** re-run verification or re-report. Reply at most once if a peer needs confirmation. Re-verifying completed work on every replay is a documented time sink that starves the pool.
-- **Claim atomically, one owner per issue — via the lock, not the label.** `mkdir ~/.claude/logs/claims/<projectKey>/<ISSUE-KEY>` is a POSIX atomic test-and-set and is the *only* step that decides ownership. It cannot be done with a `getJiraIssue` read: `editJiraIssue` replaces the labels array, so a loser's write erases the winner's label and exactly one survives — which means "if two `agent-*` labels are present" is a condition the API can never produce, and a rule built on it never fires. Transitions cannot arbitrate either; they are global, so both racers' move to `In Progress` succeeds. Once you hold the lock, the label and the transition are bookkeeping: apply them, and if a re-read does not show your label, re-apply it rather than surrendering the issue. Never edit a file outside your claimed issue's declared paths — peers run concurrently and will clobber.
+- **Claim atomically, one owner per issue — via the lock, not the label.** `mkdir ~/.claude/logs/claims/<projectKey>/<ISSUE-KEY>` is a POSIX atomic test-and-set and is the *only* step that decides ownership — take it with the full snippet in *Teammate Lifecycle* step 3.1, never bare: without the `mkdir -p` of the parent it `ENOENT`s on a fresh `$HOME`, and without `owner`/`heartbeat` the lock is invisible to the lead's sweep. It cannot be done with a `getJiraIssue` read: `editJiraIssue` replaces the labels array, so a loser's write erases the winner's label and exactly one survives — which means "if two `agent-*` labels are present" is a condition the API can never produce, and a rule built on it never fires. Transitions cannot arbitrate either; they are global, so both racers' move to `In Progress` succeeds. Once you hold the lock, the label and the transition are bookkeeping: apply them, and if a re-read does not show your label, re-apply it rather than surrendering the issue. Never edit a file outside your claimed issue's declared paths — peers run concurrently and will clobber.
 - **Globally-unique instance names.** With multiple specs/teams possibly active, a bare role name (e.g. `review-2`) can misroute to a same-named instance on a different spec. Use the names the lead assigned and address peers by their exact instance name.
 
 ## Shutdown (Implicit Team — Auto-Cleanup)

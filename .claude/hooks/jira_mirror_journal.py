@@ -109,6 +109,12 @@ def parse_files(description):
 
     Deliberately forgiving -- a path this fails to parse is simply not enforced,
     which is the status quo, whereas over-parsing would block a valid create.
+
+    Every parsed path is normalised (jira_mirror.normalize_path) so it is
+    directly comparable with the os.path.relpath() output claim_gate matches
+    against. Unnormalised, a single './'-prefixed or doubled-slash entry
+    journalled a string nothing would ever equal, taking that file out of both
+    the overlap check and the claim gate with no signal at all.
     """
     if not isinstance(description, str):
         return None
@@ -117,7 +123,7 @@ def parse_files(description):
         return None
     paths = []
     for raw in match.group(1).split(","):
-        path = raw.strip().strip("`").rstrip(".").strip()
+        path = jira_mirror.normalize_path(raw.strip().strip("`").rstrip(".").strip())
         if path:
             paths.append(path)
     return paths or None

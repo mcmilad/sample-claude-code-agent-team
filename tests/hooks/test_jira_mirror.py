@@ -96,6 +96,52 @@ def test_agent_label_handles_non_iterable_input():
     assert jira_mirror.agent_label({"key": "value"}) is None
 
 
+def test_folded_issues_do_not_share_one_defaults_list(tmp_path, monkeypatch):
+    """Regression: dict(_DEFAULTS) is a SHALLOW copy.
+
+    Every folded issue held the *same* labels list and the same files list, so
+    one consumer doing issue["labels"].append() rewrote every other issue and
+    poisoned the module-level default for the rest of the process -- every
+    later-folded issue then arrived carrying a phantom agent-* claim. The dict
+    literal this replaced built fresh lists per call.
+
+    _DEFAULTS is monkeypatched with an equivalent dict so that a reverted fix
+    poisons a throwaway copy instead of the real module state for the rest of
+    the run.
+    """
+    monkeypatch.setattr(jira_mirror, "MIRROR_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        jira_mirror, "_DEFAULTS",
+        {"summary": "", "labels": [], "status": "", "files": []},
+    )
+    jira_mirror.append_event("AGENT", {"op": "create", "key": "AGENT-1", "status": "To Do"})
+    jira_mirror.append_event("AGENT", {"op": "create", "key": "AGENT-2", "status": "To Do"})
+
+    state = jira_mirror.load_state("AGENT")
+    assert state["AGENT-1"]["labels"] is not state["AGENT-2"]["labels"]
+    assert state["AGENT-1"]["files"] is not state["AGENT-2"]["files"]
+
+    state["AGENT-1"]["labels"].append("agent-coding-1")
+    assert state["AGENT-2"]["labels"] == [], "issues must not alias one list"
+    assert jira_mirror._DEFAULTS["labels"] == [], "the module default must survive"
+    assert jira_mirror.load_state("AGENT")["AGENT-2"]["labels"] == [], \
+        "a later fold must still see the issue as unclaimed"
+
+
+def test_normalize_path_makes_both_sides_of_a_files_comparison_agree():
+    """claim_gate compares os.path.relpath() output against journalled paths.
+    Unnormalised, './src/a.py' equals nothing and that one file drops out of
+    both the overlap check and the claim gate, silently."""
+    assert jira_mirror.normalize_path("./src/a.py") == "src/a.py"
+    assert jira_mirror.normalize_path("src//a.py") == "src/a.py"
+    assert jira_mirror.normalize_path("  src/a.py  ") == "src/a.py"
+    assert jira_mirror.normalize_path("src/") == "src"
+    assert jira_mirror.normalize_path("src/a.py") == "src/a.py", "no-op on a clean path"
+    # Best-effort, never raises: unusable values normalise to '' and are dropped.
+    assert jira_mirror.normalize_path("") == ""
+    assert jira_mirror.normalize_path(None) == ""
+
+
 def test_load_state_skips_valid_json_non_object_lines(tmp_path, monkeypatch):
     """Regression: load_state must skip valid JSON that isn't an object."""
     monkeypatch.setattr(jira_mirror, "MIRROR_DIR", str(tmp_path))

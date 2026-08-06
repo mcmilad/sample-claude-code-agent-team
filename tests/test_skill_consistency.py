@@ -20,6 +20,12 @@ CLOSING_DOCS = [
     os.path.join(REPO, ".claude", "rules", "agent-team-protocol.md"),
 ]
 
+# Every doc that prescribes the end-of-run sweep of ~/.claude/logs/verified/.
+TEARDOWN_DOCS = [
+    os.path.join(REPO, ".claude", "rules", "agent-team-protocol.md"),
+    os.path.join(REPO, ".claude", "agents", "fullstack-agent.md"),
+]
+
 
 def read(path):
     with open(path) as fh:
@@ -85,6 +91,32 @@ def test_skill_sentinel_path_matches_the_gate_hook():
     text = read(SKILL)
     assert "~/.claude/logs/verified/" in text
     assert ".verified" in text
+
+
+def test_teardown_docs_sweep_only_spent_sentinels_never_the_directory():
+    """The sentinel directory is not a scratch dir. The gate renames
+    `<KEY>.verified` -> `<KEY>.inflight` for a transition still in the air and
+    the PostToolUse finalizer restores it if the call did not succeed, so a
+    teardown that removes the directory destroys an attestation a live teammate
+    earned: its retry is then blocked with "no sentinel", which reads as a
+    verification failure rather than as the teardown that caused it. Every doc
+    prescribing the sweep must glob `*.verified`.
+    """
+    assert ".inflight" in read(GATE_HOOK), \
+        "the gate no longer parks in-flight sentinels as .inflight; recheck this rule"
+
+    for path in TEARDOWN_DOCS:
+        text = read(path)
+        rel = os.path.relpath(path, REPO)
+        assert re.search(r"rm -f\s+~/\.claude/logs/verified/\S*\*\.verified", text), (
+            "{} must sweep spent sentinels with `rm -f "
+            "~/.claude/logs/verified/<projectKey>/*.verified`".format(rel)
+        )
+        blunt = re.search(r"rm -r\S*\s+~/\.claude/logs/verified/(?!\S*\*)", text)
+        assert not blunt, (
+            "{} tears down with `{}`, which also deletes the .inflight slots of "
+            "transitions still in the air".format(rel, blunt.group(0).strip())
+        )
 
 
 # --- Reverse-direction checks -----------------------------------------------

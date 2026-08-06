@@ -17,12 +17,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 HOOK = os.path.join(REPO, ".claude", "hooks", "claim_gate.py")
 
 
-def setup(tmp_path):
+def setup(tmp_path, subdir="project"):
     cfg = tmp_path / "jira-config.json"
     cfg.write_text(json.dumps({"projectKey": "AGENT"}))
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    project = tmp_path / "project"
+    project = tmp_path / subdir
     (project / "src").mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, HOME=str(home), JIRA_CONFIG_PATH=str(cfg),
                CLAUDE_PROJECT_DIR=str(project))
@@ -175,6 +175,41 @@ def test_never_gates_the_meta_work(tmp_path):
     journal(home, [declared(files=(".claude/hooks/claim_gate.py",))])
     (project / ".claude" / "hooks").mkdir(parents=True, exist_ok=True)
     assert run(env, project, rel=".claude/hooks/claim_gate.py").returncode == 0
+
+
+def test_a_checkout_under_a_build_directory_is_still_gated(tmp_path):
+    """Exclusions match the repo-RELATIVE path, never the absolute one.
+
+    Matched against the absolute path, a repo that merely *lives* under a
+    directory named build/dist/venv made every file in it look like build
+    output, so the gate allowed every write -- and that allow() carries no
+    event, so not even an audit record was left behind.
+    """
+    env, home, project = setup(tmp_path, subdir="build/checkout")
+    journal(home, [declared()])
+    proc = run(env, project)
+    assert proc.returncode == 2, "the checkout location must not disable the gate"
+    assert "AGENT-14" in proc.stderr
+
+
+def test_build_output_inside_the_repo_is_still_never_gated(tmp_path):
+    """The intent of the exclusions is unchanged: generated output *within* the
+    repo is not board work."""
+    env, home, project = setup(tmp_path)
+    journal(home, [declared(files=("build/bundle.js",))])
+    assert run(env, project, rel="build/bundle.js").returncode == 0
+
+
+def test_a_declared_path_in_another_shape_still_gates_the_file(tmp_path):
+    """The journal is never migrated, so it holds paths recorded before the
+    journaller normalised them. claim_gate compares os.path.relpath() output;
+    against a raw './src/login.py' that comparison silently matched nothing and
+    the file dropped out of the gate entirely."""
+    env, home, project = setup(tmp_path)
+    journal(home, [declared(files=("./src/login.py",))])
+    proc = run(env, project, rel="src/login.py")
+    assert proc.returncode == 2
+    assert "AGENT-14" in proc.stderr
 
 
 def test_blocks_only_once_for_the_same_issue(tmp_path):

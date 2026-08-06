@@ -90,10 +90,11 @@ def test_allows_in_review_with_sentinel(tmp_path):
 FINALIZE = os.path.join(REPO, ".claude", "hooks", "jira_transition_sentinel_finalize.py")
 
 
-def run_finalize(env, issue="AGENT-14", response="Issue transitioned successfully"):
+def run_finalize(env, issue="AGENT-14", response="Issue transitioned successfully",
+                 transition_id="31"):
     payload = {
         "tool_name": TRANSITION,
-        "tool_input": {"issueIdOrKey": issue, "transition": {"id": "31"}},
+        "tool_input": {"issueIdOrKey": issue, "transition": {"id": transition_id}},
         "tool_response": response,
     }
     return subprocess.run([sys.executable, FINALIZE], input=json.dumps(payload),
@@ -185,6 +186,157 @@ def test_stale_inflight_is_reclaimable_when_the_tool_never_ran(tmp_path):
     old = time.time() - 3600
     os.utime(inflight, (old, old))
     assert run_hook(env, transition_id="31").returncode == 0, "stale in-flight is reclaimable"
+
+
+def test_an_ungated_transition_never_spends_an_in_flight_sentinel(tmp_path):
+    """The gate never consumes for an ungated transition, so that transition's
+    PostToolUse is not the other half of any consume and must leave the
+    sentinel alone. It used to delete a lingering .inflight on success --
+    In Progress (21) is the documented claim step, run on every issue -- which
+    destroyed an attestation that had already passed verification. The gated
+    retry then read "no sentinel", which to an agent looks like a verification
+    failure rather than a stuck call, and nothing on disk could recover it."""
+    env, home = setup_env(tmp_path)
+    path = sentinel(home)
+    assert run_hook(env, transition_id="31").returncode == 0
+    inflight = inflight_of(path)
+    assert os.path.exists(inflight)
+
+    # That In Review call was denied/cancelled, so no PostToolUse fired for it.
+    # The same issue is now moved back to In Progress, and that call succeeds.
+    assert run_hook(env, transition_id="21").returncode == 0
+    assert run_finalize(env, transition_id="21").returncode == 0
+
+    assert os.path.exists(inflight), \
+        "an ungated transition must not spend a sentinel it never consumed"
+    assert not os.path.exists(path), "nor forge one back into existence"
+
+    # Because the attestation survived, the documented recovery still works.
+    old = time.time() - 3600
+    os.utime(inflight, (old, old))
+    assert run_hook(env, transition_id="31").returncode == 0, \
+        "the stale in-flight reclaim must still be able to recover it"
+
+
+def test_an_ungated_failure_never_resurrects_an_in_flight_sentinel(tmp_path):
+    """The half that defeats the review gate itself. A FAILING ungated
+    transition used to restore an .inflight belonging to a gated call that was
+    still in flight. That gated call then landed, found no .inflight to spend,
+    and left a live .verified behind -- so one attestation authorized both
+    In Review and Done with no second verification."""
+    env, home = setup_env(tmp_path)
+    path = sentinel(home)
+    assert run_hook(env, transition_id="31").returncode == 0
+
+    assert run_hook(env, transition_id="21").returncode == 0
+    assert run_finalize(env, transition_id="21",
+                        response="Error: 401 Unauthorized").returncode == 0
+    assert not os.path.exists(path), \
+        "an ungated failure must not resurrect another transition's sentinel"
+
+    # The gated In Review lands and spends its own sentinel, as it should.
+    assert run_finalize(env, transition_id="31").returncode == 0
+    assert not os.path.exists(inflight_of(path))
+    assert run_hook(env, transition_id="41").returncode == 2, \
+        "one attestation must never authorize In Review and then Done"
+
+
+def test_an_unknown_transition_id_leaves_the_in_flight_sentinel_alone(tmp_path):
+    """The gate fails open on an id outside the discovered map, consuming
+    nothing for it. Fail-open in the finalizer must mean the same thing:
+    touch nothing. Deleting or restoring here would act on a sentinel whose
+    real transition is still unresolved."""
+    env, home = setup_env(tmp_path)
+    path = sentinel(home)
+    assert run_hook(env, transition_id="31").returncode == 0
+    assert run_finalize(env, transition_id="99").returncode == 0
+    assert os.path.exists(inflight_of(path)), "an unknown id must finalize nothing"
+    assert not os.path.exists(path)
+
+    # The explicit `not target` guard is not redundant with is_gated(): a
+    # malformed discovered gate set containing null makes `None in gated` true,
+    # so an unresolvable id would read as GATED and the finalizer would
+    # adjudicate a sentinel whose transition it never identified.
+    other = tmp_path / "malformed"
+    other.mkdir()
+    env2, home2 = setup_env(other, dict(CONFIG, gatedStatuses=["In Review", None]))
+    path2 = sentinel(home2)
+    assert run_hook(env2, transition_id="31").returncode == 0
+    assert run_finalize(env2, transition_id="99").returncode == 0
+    assert os.path.exists(inflight_of(path2)), \
+        "unknown must stay unknown even when the gate set itself is malformed"
+
+
+def test_the_finalizer_takes_its_gated_set_from_config_not_a_local_copy(tmp_path):
+    """Drift pin. Both phases resolve gated-ness through the same two helpers
+    (target_status / is_gated in jira_transition_verify_gate); a second copy of
+    the rule inside the finalizer would desynchronise them the moment a board
+    gates different statuses. On a board that gates only In Progress, the
+    finalizer must spend on 21 and keep its hands off 31."""
+    config = dict(CONFIG, gatedStatuses=["In Progress"])
+    env, home = setup_env(tmp_path, config)
+    path = sentinel(home)
+
+    assert run_hook(env, transition_id="21").returncode == 0
+    inflight = inflight_of(path)
+    assert os.path.exists(inflight), "the gate consumes for the CONFIGURED status"
+
+    assert run_finalize(env, transition_id="31").returncode == 0
+    assert os.path.exists(inflight), \
+        "In Review is not gated on this board -- the finalizer must not touch it"
+
+    assert run_finalize(env, transition_id="21").returncode == 0
+    assert not os.path.exists(inflight), "the configured gated status spends it"
+
+
+def test_gatedness_resolution_is_total_even_on_a_malformed_transition_field():
+    """Both hooks now route their decision through these two helpers, so the
+    helpers must never raise: a raise resolves the call through the outer
+    fail-open handler instead, which exits 0 with an EMPTY audit payload and is
+    indistinguishable from a deliberate "not gated". `transition` arriving as
+    the bare id string is the documented model failure mode `as_dict` exists
+    for -- it is truthy, so `or {}` lets it through to .get()."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gate_mod", HOOK)
+    gate = importlib.util.module_from_spec(spec)
+    sys.modules["gate_mod"] = gate
+    spec.loader.exec_module(gate)
+
+    cfg = {"transitions": {"31": "In Review"}, "gatedStatuses": ["In Review"]}
+    assert gate.target_status(cfg, {"transition": {"id": "31"}}) == "In Review"
+    assert gate.target_status(cfg, {"transition": {"id": 31}}) == "In Review", \
+        "a numeric id must resolve, not fall through as unknown"
+    for junk in ("not-a-dict", {"transition": "31"}, {"transition": []}, {}, None, 7):
+        assert gate.target_status(cfg, junk) is None
+    assert gate.is_gated(cfg, None) is False
+
+
+def test_a_malformed_transition_field_is_decided_not_crashed_through(tmp_path):
+    """End-to-end companion: both hooks must REACH a decision on junk rather
+    than land in the outer handler. Return code alone cannot tell the two
+    apart -- both are 0 -- so this reads the audit trail, which is the whole
+    value of a fail-open guardrail."""
+    env, home = setup_env(tmp_path)
+    path = sentinel(home)
+    assert run_hook(env, transition_id="31").returncode == 0  # consume -> .inflight
+
+    for script in (HOOK, FINALIZE):
+        payload = {
+            "tool_name": TRANSITION,
+            "tool_input": {"issueIdOrKey": "AGENT-14", "transition": "31"},
+            "tool_response": "Issue transitioned successfully",
+        }
+        proc = subprocess.run([sys.executable, script], input=json.dumps(payload),
+                              capture_output=True, text=True, env=env)
+        assert proc.returncode == 0
+        records = [json.loads(l) for l in open(
+            os.path.join(str(home), ".claude", "logs", "team-hooks.jsonl")) if l.strip()]
+        assert "hook error" not in (records[-1].get("reason") or ""), \
+            "{} crashed into fail-open instead of deciding: {}".format(
+                os.path.basename(script), records[-1].get("reason"))
+
+    assert os.path.exists(inflight_of(path)), \
+        "an unresolvable transition must finalize nothing"
 
 
 def test_allows_ungated_transitions_without_sentinel(tmp_path):
@@ -300,6 +452,65 @@ def test_prose_screening_still_applies_to_genuinely_unstructured_text():
     assert mod.transition_succeeded("Issue transitioned") is True
     assert mod.transition_succeeded("Error: could not transition") is False
     assert mod.transition_succeeded("not valid json {") is True
+
+
+def run_hook_raw(env, tool_input):
+    """Send tool_input verbatim, so a test can hand the hook a non-dict."""
+    payload = {"tool_name": TRANSITION, "tool_input": tool_input}
+    return subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
+                          capture_output=True, text=True, env=env)
+
+
+def read_audit(home):
+    path = os.path.join(str(home), ".claude", "logs", "team-hooks.jsonl")
+    if not os.path.exists(path):
+        return []
+    with open(path) as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+STRINGIFIED = json.dumps({"issueIdOrKey": "AGENT-14", "transition": {"id": "31"}})
+
+
+def test_a_json_string_tool_input_does_not_bypass_the_gate(tmp_path):
+    """A model that stringifies tool_input used to walk straight through: the
+    string reduces to {}, issueIdOrKey comes back empty, the project-scope check
+    calls the issue somebody else's and the gate exits 0. An unverified
+    transition lands. The same call as a dict is blocked, so the shape of the
+    payload -- not the state of the work -- decided whether the gate applied."""
+    env, home = setup_env(tmp_path)
+    proc = run_hook_raw(env, STRINGIFIED)
+    assert proc.returncode == 2, "a stringified payload must be gated like a dict"
+    assert "AGENT-14" in proc.stderr
+
+
+def test_a_json_string_tool_input_still_passes_when_verified(tmp_path):
+    """Decoding must not turn the gate into a trap: with the sentinel written,
+    the stringified payload is allowed and consumed exactly like a dict one."""
+    env, home = setup_env(tmp_path)
+    path = sentinel(home)
+    assert run_hook_raw(env, STRINGIFIED).returncode == 0
+    assert not os.path.exists(path), "the sentinel is consumed, as for a dict payload"
+
+
+def test_a_json_string_tool_input_for_another_project_is_still_ignored(tmp_path):
+    env, home = setup_env(tmp_path)
+    other = json.dumps({"issueIdOrKey": "SCRUM-2", "transition": {"id": "41"}})
+    assert run_hook_raw(env, other).returncode == 0
+
+
+def test_an_unreadable_tool_input_fails_open_with_a_truthful_reason(tmp_path):
+    """Fail-open is right -- without an issue key the hook cannot tell its own
+    project from the operator's real client work, and blocking there would be a
+    serious defect. But the audit reason must name the real cause: recording
+    'issue belongs to another project' for an issue whose project was never
+    read is a false trail, and worse for diagnosis than the raw exception it
+    replaced."""
+    env, home = setup_env(tmp_path)
+    assert run_hook_raw(env, "AGENT-14 to In Review").returncode == 0
+    reason = read_audit(home)[-1]["reason"]
+    assert "tool_input" in reason
+    assert "another project" not in reason, "the hook never read a project here"
 
 
 def test_a_failure_encoded_as_a_json_string_restores_the_sentinel(tmp_path):

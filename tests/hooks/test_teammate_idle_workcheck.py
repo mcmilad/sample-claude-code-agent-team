@@ -181,6 +181,11 @@ def test_reviewers_are_told_not_to_self_claim(tmp_path):
     assert proc.returncode == 2
     assert "do NOT self-claim" in proc.stderr
     assert "mkdir" not in proc.stderr, "reviewers must not be given the claim recipe"
+    assert "claim from that result" not in proc.stderr, (
+        "the staleness caveat's 'Re-run the Find JQL and claim from that result' "
+        "must not be emitted above the reviewer branch: it lands one line before "
+        "'do NOT self-claim' and contradicts review-agent.md ('Do not run the "
+        "role JQL and grab the sprint's role-review card')")
 
 
 def test_nudge_teaches_the_lock_not_the_label_race(tmp_path):
@@ -192,7 +197,18 @@ def test_nudge_teaches_the_lock_not_the_label_race(tmp_path):
     journal(home, [{"op": "create", "key": "AGENT-14", "labels": ["role-coding"],
                     "status": "To Do"}])
     err = run_hook(env).stderr
-    assert "mkdir ~/.claude/logs/claims/" in err
+    assert 'CLAIMS=~/.claude/logs/claims/AGENT; mkdir -p "$CLAIMS"' in err, (
+        "the nudge must bootstrap the claims parent, project key substituted: a "
+        "bare mkdir of the issue directory is ENOENT on a fresh $HOME and the "
+        "recipe reads a failed mkdir as a lost race, so every agent would lose")
+    assert 'if mkdir "$CLAIMS/<ISSUE-KEY>"' in err, "the lock must be the test-and-set"
+    assert '/owner"' in err and '/heartbeat"' in err, (
+        "a lock with no heartbeat file is invisible to the lead's stale-claim "
+        "sweep (`find ... -name heartbeat`), and one with no owner leaves the "
+        "loser inferring who won")
+    assert "Re-run the sprint-scoped Find JQL" in err, (
+        "non-reviewers still get the Find JQL redirect -- it moved into the "
+        "claiming branch, it was not deleted")
     assert "In Progress" in err
     assert "lowest instance name" not in err, "the unreachable tie-break must be gone"
     assert "issuelinks" in err and "must include labels" in err

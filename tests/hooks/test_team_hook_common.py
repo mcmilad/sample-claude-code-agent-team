@@ -50,3 +50,33 @@ def test_as_dict_coalesces_truthy_non_dicts():
     assert team_hook_common.as_dict(["labels"]) == {}
     assert team_hook_common.as_dict(None) == {}
     assert team_hook_common.as_dict(0) == {}
+
+
+tool_input_of = team_hook_common.tool_input_of
+
+
+def test_tool_input_of_decodes_a_stringified_object():
+    """as_dict() would reduce this to {}, which names no project -- and every
+    gating hook reads its scope out of tool_input, so an empty one reads as
+    'somebody else's project' and the guardrail silently switches off."""
+    assert tool_input_of({"tool_input": {"projectKey": "AGENT"}}) == (
+        {"projectKey": "AGENT"}, None)
+    assert tool_input_of({"tool_input": '{"projectKey": "AGENT"}'}) == (
+        {"projectKey": "AGENT"}, None)
+
+
+def test_tool_input_of_reports_a_genuinely_unreadable_input():
+    """Unreadable must be distinguishable from empty. Reporting it as {} is what
+    let both hooks record 'belongs to another project' for an input whose
+    project they never managed to read."""
+    for bad in ("AGENT-14 to In Review", "[1, 2]", 7, ["a"]):
+        value, unreadable = tool_input_of({"tool_input": bad})
+        assert value == {}
+        assert unreadable, "a %s tool_input is unreadable, not empty" % type(bad).__name__
+        assert "tool_input" in unreadable and "JSON object" in unreadable
+
+
+def test_tool_input_of_treats_an_absent_input_as_empty_not_unreadable():
+    assert tool_input_of({}) == ({}, None)
+    assert tool_input_of({"tool_input": None}) == ({}, None)
+    assert tool_input_of("not a payload") == ({}, None)

@@ -43,7 +43,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from team_hook_common import (  # noqa: E402
-    read_payload, allow, block, audit, as_dict, safe_path_component, verified_dir,
+    read_payload, allow, block, audit, as_dict, tool_input_of,
+    safe_path_component, verified_dir,
 )
 import jira_mirror  # noqa: E402
 
@@ -55,6 +56,47 @@ DEFAULT_GATED = ("In Review", "Done")
 # MCP round trip with wide margin; only reached when PostToolUse never fired,
 # i.e. the tool call was denied or cancelled rather than executed.
 INFLIGHT_STALE_SECONDS = 300
+
+
+# --- gated-ness resolution -------------------------------------------------
+# Shared with jira_transition_sentinel_finalize.py, which imports these rather
+# than re-deriving them. The finalizer must act on exactly the transitions this
+# gate consumes a sentinel for and no others: a second copy of this rule lets
+# the two phases of the consume drift, and an ungated PostToolUse then spends
+# or resurrects an .inflight that belongs to a gated transition.
+
+def target_status(cfg, tool_input):
+    """The status this transitionJiraIssue call lands the issue in, or None.
+
+    transitionJiraIssue takes a TRANSITION ID, not a target status name, so the
+    id is resolved through the transitions map that bootstrap discovers. An id
+    that is absent or not in the map resolves to unknown -- and unknown is never
+    gated, so it never blocks here and is never finalized there.
+
+    as_dict on `transition` too, not `or {}`: every field here is model-authored,
+    and a truthy non-dict (transition arriving as the bare id STRING) sails past
+    `or {}` and raises on the next .get(). Both hooks would then resolve this
+    call through their outer fail-open handler instead of through this function
+    -- exiting 0 with an empty audit payload, indistinguishable from "not
+    gated". This must be total so the two phases agree even on junk.
+    """
+    tid = str(as_dict(as_dict(tool_input).get("transition")).get("id", ""))
+    return (cfg.get("transitions") or {}).get(tid) or None
+
+
+def is_gated(cfg, target):
+    """Whether landing in `target` requires a consumed sentinel.
+
+    isinstance, not truthiness: `x or DEFAULT` cannot tell "discovery found no
+    gated status on this board" ([]) from "nobody configured this" (absent).
+    Falling back on [] gates two status names the board does not have, so
+    nothing is really gated while the audit log claims a gate is in force. An
+    explicit [] is honoured as-is; bootstrap fails at setup (exit 5) rather
+    than shipping an empty gate set.
+    """
+    configured = cfg.get("gatedStatuses")
+    gated = configured if isinstance(configured, list) else list(DEFAULT_GATED)
+    return target in gated
 
 
 def _sentinel_base(project, issue_key):
@@ -81,11 +123,23 @@ def main():
     if p.get("tool_name") != TRANSITION:
         allow()
 
-    # as_dict, not `or {}`: a truthy non-dict (tool_input arriving as a JSON
-    # STRING is a documented model failure mode) passes `or {}` untouched and
-    # raises on the next .get(), which the fail-open handler swallows -- the
-    # gate then exits 0 and an unverified transition sails through.
-    tool_input = as_dict(p.get("tool_input"))
+    # tool_input_of, not as_dict: a tool_input arriving as a JSON STRING is a
+    # documented model failure mode, and as_dict() turns it into {} -- whereupon
+    # issueIdOrKey is empty, the project-scope check below decides the issue is
+    # not ours, and the gate exits 0. An unverified transition sails through AND
+    # the audit log blames "another project", which is false and sends whoever
+    # reads it looking in the wrong place. tool_input_of decodes the string
+    # instead, so the gate judges the real issue key.
+    tool_input, unreadable = tool_input_of(p)
+    if unreadable:
+        # Genuinely unreadable: the issue key is unknowable, so we cannot tell
+        # an issue in our project from the operator's real client work. Fail
+        # open per the house rule -- but name the actual cause. (Nothing is
+        # smuggled past the gate this way: a tool_input the hook cannot parse
+        # as JSON is not one the MCP server can act on either.)
+        allow(EVENT, p, reason=(
+            "verification gate did not run: {} -- issue key and project "
+            "unknowable, fail-open".format(unreadable)))
     cfg = jira_mirror.load_config()
     project = cfg.get("projectKey")
     if not project:
@@ -105,21 +159,15 @@ def main():
     if jira_mirror.issue_project(issue_key) != project:
         allow(EVENT, p, reason="issue belongs to another project -- not gated")
 
-    transition_id = str((tool_input.get("transition") or {}).get("id", ""))
-    target = (cfg.get("transitions") or {}).get(transition_id)
+    # as_dict here too: this line is only message material, but it runs BEFORE
+    # target_status and would otherwise raise past it, undoing its totality.
+    transition_id = str(as_dict(tool_input.get("transition")).get("id", ""))
+    target = target_status(cfg, tool_input)
     if not target:
         allow(EVENT, p, reason="transition id {} not in discovered map -- fail-open".format(
             transition_id))
 
-    # isinstance, not truthiness: `x or DEFAULT` cannot tell "discovery found no
-    # gated status on this board" ([]) from "nobody configured this" (absent).
-    # Falling back on [] gates two status names the board does not have, so
-    # nothing is really gated while the audit log claims a gate is in force. An
-    # explicit [] is honoured as-is; bootstrap fails at setup (exit 5) rather
-    # than shipping an empty gate set.
-    configured = cfg.get("gatedStatuses")
-    gated = configured if isinstance(configured, list) else list(DEFAULT_GATED)
-    if target not in gated:
+    if not is_gated(cfg, target):
         allow(EVENT, p, reason="target status {} is not gated".format(target))
 
     issue = jira_mirror.load_state(project).get(issue_key) or {}

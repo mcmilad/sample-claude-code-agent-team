@@ -23,7 +23,9 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from team_hook_common import read_payload, allow, block, audit, as_dict  # noqa: E402
+from team_hook_common import (  # noqa: E402
+    read_payload, allow, block, audit, as_dict, tool_input_of,
+)
 import jira_mirror  # noqa: E402
 import jira_mirror_journal  # noqa: E402  (parse_files -- one parser, two hooks)
 
@@ -79,7 +81,11 @@ def files_overlap(project, labels, description):
             continue
         if str(issue.get("status") or "") in TERMINAL_STATUSES:
             continue
-        clash = mine & set(issue.get("files") or [])
+        # Normalised on both sides: `mine` by parse_files, the journalled paths
+        # here, because the journal is never migrated and still holds entries
+        # recorded before the journaller normalised them.
+        clash = mine & {jira_mirror.normalize_path(f)
+                        for f in (issue.get("files") or [])}
         if clash:
             return key, clash
     return None
@@ -90,9 +96,20 @@ def main():
     if p.get("tool_name") != CREATE:
         allow()
 
-    # as_dict, not `or {}` -- see jira_transition_verify_gate: a JSON-string
-    # tool_input would otherwise disable this check entirely via fail-open.
-    tool_input = as_dict(p.get("tool_input"))
+    # tool_input_of, not as_dict -- see jira_transition_verify_gate: as_dict
+    # reduces a JSON-string tool_input to {}, which then names no project, so
+    # the scope check below waves it through as "another project" and the whole
+    # format check is disabled by a payload the model merely stringified.
+    # Decoding it instead means the issue is policed on its real contents.
+    tool_input, unreadable = tool_input_of(p)
+    if unreadable:
+        # Scope is unknowable without projectKey. The site holds real client
+        # work and blocking a create there would be a serious defect, so fail
+        # open -- but record the true cause rather than a project claim we
+        # cannot actually make.
+        allow(EVENT, p, reason=(
+            "format check did not run: {} -- target project unknowable, "
+            "fail-open".format(unreadable)))
     cfg = jira_mirror.load_config()
     project = cfg.get("projectKey")
     if not project:

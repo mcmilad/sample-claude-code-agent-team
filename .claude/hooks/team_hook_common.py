@@ -91,6 +91,43 @@ def as_dict(value):
     return value if isinstance(value, dict) else {}
 
 
+def tool_input_of(payload):
+    """(tool_input_dict, unreadable_cause_or_None) for a hook payload.
+
+    A tool_input arriving as a JSON *string* is DECODED here, unlike as_dict()
+    which deliberately discards one. The two directions are opposite on purpose:
+
+      - a nested field (additional_fields) carries bypass authority, so
+        refusing to decode it is the safe direction -- an unreadable
+        skip-format-check label must not be a bypass;
+      - tool_input itself carries the SCOPE. Every gating hook decides whether
+        an action is its business by reading projectKey / issueIdOrKey out of
+        it. Discarding it makes the scope unknown, and an unknown scope reads
+        to those hooks as "some other project" -- so they allow, and the audit
+        log records a reason that is simply false. Decoding can only ever turn
+        an allow into a block, never the reverse.
+
+    Anything still not a dict is genuinely unreadable and the caller must fail
+    open on it -- the scope cannot be established, and these hooks must never
+    police a project that is not the configured one -- but must say why. An
+    absent tool_input is not unreadable: no arguments legitimately reads as {}.
+    """
+    raw = payload.get("tool_input") if isinstance(payload, dict) else None
+    if isinstance(raw, dict):
+        return raw, None
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+        except Exception:
+            decoded = None
+        if isinstance(decoded, dict):
+            return decoded, None
+    if raw is None:
+        return {}, None
+    return {}, "tool_input arrived as a {}, not a JSON object".format(
+        type(raw).__name__)
+
+
 def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 

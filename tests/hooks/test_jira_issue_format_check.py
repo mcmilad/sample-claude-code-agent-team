@@ -199,6 +199,21 @@ def test_blocks_files_overlapping_a_sibling_in_the_same_scope(tmp_path):
     assert "src/auth/login.py" in proc.stderr
 
 
+def test_overlap_sees_through_a_journalled_path_in_another_shape(tmp_path):
+    """The journal is never versioned, migrated or rotated, so it still holds
+    paths recorded before the journaller normalised them. Compared raw, a
+    './src/auth/login.py' entry clashes with nothing and two concurrent writers
+    are cleared for the same file -- the exact collision this check exists for."""
+    seed_journal(tmp_path, [{
+        "op": "create", "key": "AGENT-14", "status": "To Do",
+        "labels": ["spec-auth-api", "role-coding", "group-2"],
+        "files": ["./src/auth/login.py"],
+    }])
+    proc = run_hook(well_formed(), tmp_path)
+    assert proc.returncode == 2
+    assert "AGENT-14" in proc.stderr
+
+
 def test_allows_overlap_across_different_groups(tmp_path):
     """Sequencing two overlapping issues into different groups is the documented
     escape hatch, so it must not be blocked."""
@@ -279,13 +294,56 @@ def test_does_not_block_a_create_whose_only_clash_is_at_in_review(tmp_path):
     assert run_hook(well_formed(), tmp_path).returncode == 0
 
 
-def test_a_json_string_tool_input_does_not_disable_the_check(tmp_path):
-    """`or {}` passed a truthy non-dict straight through; .get() then raised and
-    the fail-open handler exited 0, creating a malformed issue unchecked."""
+def run_hook_raw(tool_input, tmp_path):
+    """Send tool_input verbatim, so a test can hand the hook a non-dict."""
     cfg = tmp_path / "jira-config.json"
     cfg.write_text(json.dumps({"projectKey": "AGENT"}))
     env = dict(os.environ, HOME=str(tmp_path / "home"), JIRA_CONFIG_PATH=str(cfg))
-    payload = {"tool_name": CREATE, "tool_input": json.dumps(well_formed())}
-    proc = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
+    payload = {"tool_name": CREATE, "tool_input": tool_input}
+    return subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
                           capture_output=True, text=True, env=env)
-    assert proc.returncode == 0, "a string tool_input names no project -- not policed"
+
+
+def read_audit(tmp_path):
+    path = os.path.join(str(tmp_path / "home"), ".claude", "logs", "team-hooks.jsonl")
+    if not os.path.exists(path):
+        return []
+    with open(path) as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def test_a_json_string_tool_input_does_not_disable_the_check(tmp_path):
+    """`or {}` passed a truthy non-dict straight through; .get() then raised and
+    the fail-open handler exited 0. as_dict() fixed the crash but not the
+    bypass: {} names no projectKey, so the scope check waves the create through
+    as another project's and the format check never runs. Whether a malformed
+    issue is caught must not depend on whether the model stringified its
+    arguments."""
+    proc = run_hook_raw(json.dumps(well_formed(summary="no tag here")), tmp_path)
+    assert proc.returncode == 2
+    assert "role tag" in proc.stderr.lower()
+
+
+def test_a_json_string_tool_input_still_allows_a_well_formed_issue(tmp_path):
+    assert run_hook_raw(json.dumps(well_formed()), tmp_path).returncode == 0
+
+
+def test_a_json_string_tool_input_for_another_project_is_still_unpoliced(tmp_path):
+    """Decoding widens what is checked, never what is policed: the site holds
+    real client work and blocking a create there would be a serious defect."""
+    proc = run_hook_raw(json.dumps(well_formed(
+        projectKey="SCRUM", summary="MUFG - SCCM", description="",
+        additional_fields={})), tmp_path)
+    assert proc.returncode == 0
+
+
+def test_an_unreadable_tool_input_fails_open_with_a_truthful_reason(tmp_path):
+    """Fail-open is right -- with no projectKey the hook cannot tell its own
+    project from the operator's client work. But the audit reason must name the
+    real cause; 'issue targets another project' is a claim the hook never had
+    the input to make, and it sends a reader looking in the wrong place."""
+    proc = run_hook_raw("create a coding task for login", tmp_path)
+    assert proc.returncode == 0
+    reason = read_audit(tmp_path)[-1]["reason"]
+    assert "tool_input" in reason
+    assert "another project" not in reason

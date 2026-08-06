@@ -36,14 +36,29 @@ You are typically one of **several `coding-agent` instances** (e.g. `coding-1` �
 - **Self-claim immediately and continuously.** Don't wait to be handed an issue. On start,
   run the role JQL from `jira-workflow` and claim any unclaimed issue for your role. The
   moment you finish one, claim the next. Keep the board draining.
-- **Claim atomically — the lock decides, not the label.**
-  `mkdir ~/.claude/logs/claims/<projectKey>/<ISSUE-KEY>` succeeds for exactly one agent; if
-  it fails you lost, so pick another issue and touch nothing. Only then add your `agent-*`
+- **Claim atomically — the lock decides, not the label.** Bootstrap the parent, then
+  test-and-set, then record `owner` and `heartbeat` — the lead's stale-claim sweep matches
+  the `heartbeat` **file** (`find … -name heartbeat`), so a lock without one is invisible:
+
+  ```bash
+  CLAIMS=~/.claude/logs/claims/<projectKey>; mkdir -p "$CLAIMS"
+  if mkdir "$CLAIMS/<ISSUE-KEY>" 2>/dev/null; then
+    echo "<your-instance>" > "$CLAIMS/<ISSUE-KEY>/owner"
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$CLAIMS/<ISSUE-KEY>/heartbeat"
+  else
+    echo "LOST -- owned by $(cat "$CLAIMS/<ISSUE-KEY>/owner" 2>/dev/null)"
+  fi
+  ```
+
+  A bare `mkdir` of the issue directory `ENOENT`s on a fresh `$HOME`, and you would misread
+  that as losing. Only the **second** `mkdir` failing means you lost: pick another issue and
+  touch nothing. Never write `owner`/`heartbeat` unconditionally — on a lost race that
+  overwrites the winner's own record. Only then add your `agent-*`
   label, transition to **In Progress**, and comment `Claimed by <instance>.` — all before
   you edit a file. Re-read to confirm, but **fail open**: an absent label with no competing
   `agent-*` is an unconfirmed write, not a loss — you hold the lock, so re-apply it. Never
   count `agent-*` labels to detect a race; `editJiraIssue` replaces the array, so only one
-  ever survives.
+  ever survives. `jira-workflow` is the normative copy of this protocol.
 - **Stay in your claimed files.** Because peers run concurrently, editing files outside your claimed task's declared paths risks clobbering their work — never do it.
 - If you ever find no unclaimed `[coding]` work but tasks remain blocked, notify the lead (a dependency or too-coarse task may be starving the pool) rather than idling silently.
 

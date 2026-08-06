@@ -68,6 +68,20 @@ _EXCLUDED_SEGMENTS = (
 )
 
 
+def is_excluded(path, root):
+    """Match the exclusions against the REPO-RELATIVE path, never the absolute one.
+
+    `seg in path` on the absolute path let the checkout LOCATION disable the
+    guardrail: a repo cloned under any directory named build/dist/venv/... made
+    every file in it look like build output, so every write was allowed -- and
+    since that allow() carries no event, not even an audit record was left.
+    Callers check `path` sits under `root` first, so slicing the root off leaves
+    the leading '/' the segment patterns anchor on.
+    """
+    rel = path[len(root.rstrip("/")):]
+    return any(seg in rel for seg in _EXCLUDED_SEGMENTS)
+
+
 def state_path(session_id):
     return os.path.join(
         log_dir(), "claim-gate", safe_path_component(session_id, "nosession") + ".json"
@@ -124,14 +138,21 @@ def declaring_issues(project, rel_path):
     Uses .get() throughout: the mirror journal is never versioned or migrated,
     so events written before `files` existed must yield the default rather than
     raising into the fail-open handler and silently disabling this hook.
+
+    Both sides go through jira_mirror.normalize_path, and for the same reason:
+    the journal is never migrated, so it still holds paths recorded before the
+    journaller normalised them. './src/a.py' must gate src/a.py -- comparing raw
+    strings took exactly that file out of this hook, silently.
     """
     found = []
     try:
         state = jira_mirror.load_state(project)
     except Exception:
         return found
+    want = jira_mirror.normalize_path(rel_path)
     for key, issue in sorted(state.items()):
-        if rel_path in (issue.get("files") or []):
+        declared = {jira_mirror.normalize_path(f) for f in (issue.get("files") or [])}
+        if want in declared:
             found.append((key, issue))
     return found
 
@@ -197,7 +218,7 @@ def main():
     root = project_dir(p)
     if not path.startswith(root.rstrip("/") + "/"):
         allow()
-    if any(seg in path for seg in _EXCLUDED_SEGMENTS):
+    if is_excluded(path, root):
         allow()
 
     cfg = jira_mirror.load_config()

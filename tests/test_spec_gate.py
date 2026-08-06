@@ -170,6 +170,8 @@ def test_sessions_are_counted_independently(run):
         "notes.txt",
         "node_modules/pkg/index.js",
         ".venv/lib/thing.py",
+        "build/bundle.js",
+        "dist/app/main.js",
     ],
 )
 def test_docs_and_tooling_never_count(run, relative):
@@ -187,6 +189,32 @@ def test_existing_files_are_not_scaffolding(run):
         target = src / name
         target.write_text("# already here\n")
         assert run("write", write_payload(target)).returncode == 0
+
+
+def test_a_checkout_under_a_build_directory_still_counts(tmp_path):
+    """Exclusions match the repo-RELATIVE path, never the absolute one.
+
+    Matched against the absolute path, a repo that merely *lives* under a
+    directory named build/dist/venv made every file in it look like build
+    output: nothing counted, the gate never fired, and -- because that path
+    allows without an event -- no audit record said so.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "build" / "checkout"
+    (project / "src").mkdir(parents=True)
+    environ = dict(os.environ, HOME=str(home), CLAUDE_PROJECT_DIR=str(project))
+    environ.pop("CLAUDE_SPEC_GATE", None)
+
+    codes = []
+    for name in ("a.py", "b.py", "c.py"):
+        codes.append(subprocess.run(
+            [sys.executable, HOOK, "write"],
+            input=json.dumps(write_payload(project / "src" / name)),
+            capture_output=True, text=True, env=environ,
+        ).returncode)
+
+    assert codes == [0, 0, 2], "the third new source file must still stop once"
 
 
 def test_files_outside_the_project_do_not_count(run, tmp_path):

@@ -172,10 +172,24 @@ def spec_exists(root):
     return False
 
 
+def is_excluded(path, root):
+    """Match the exclusions against the REPO-RELATIVE path, never the absolute one.
+
+    `seg in path` on the absolute path let the checkout LOCATION disable the
+    guardrail: a repo cloned under any directory named build/dist/venv/... made
+    every file in it look like build output, so nothing ever counted toward the
+    threshold and the gate silently never fired. The caller checks `path` sits
+    under `root` first, so slicing the root off leaves the leading '/' the
+    segment patterns anchor on.
+    """
+    rel = path[len(root.rstrip("/")):]
+    return any(seg in rel for seg in _EXCLUDED_SEGMENTS)
+
+
 def counts_toward_threshold(path, root):
     if not path.startswith(root.rstrip("/") + "/"):
         return False
-    if any(seg in path for seg in _EXCLUDED_SEGMENTS):
+    if is_excluded(path, root):
         return False
     if not path.endswith(_SOURCE_SUFFIXES):
         return False

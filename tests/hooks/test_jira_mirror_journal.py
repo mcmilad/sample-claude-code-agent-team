@@ -379,3 +379,25 @@ def test_create_journals_the_declared_files(tmp_path, monkeypatch):
     }, home)
     events = [e for e in read_journal(home) if e.get("key") == "AGENT-52"]
     assert events and events[0]["files"] == ["src/a.py", "src/b.py"]
+
+
+def test_declared_files_are_journalled_normalised(tmp_path, monkeypatch):
+    """claim_gate compares os.path.relpath() output against these strings, and
+    the overlap check compares them to another issue's parsed list. Journalled
+    raw, a './'-prefixed or doubled-slash path equals neither -- so that one
+    file silently left both guardrails while the issue looked perfectly formed."""
+    write_config(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    run_hook({
+        "tool_name": TOOL + "createJiraIssue",
+        "tool_input": {
+            "projectKey": "AGENT",
+            "summary": "[coding] impl",
+            "description": ("Spec: x\nFiles: ./src/a.py, src//b.py, `./src/c.py` \n"
+                            "Acceptance: y\nRun: pytest -q"),
+            "additional_fields": {"labels": ["role-coding", "spec-x"]},
+        },
+        "tool_response": {"key": "AGENT-53"},
+    }, home)
+    events = [e for e in read_journal(home) if e.get("key") == "AGENT-53"]
+    assert events and events[0]["files"] == ["src/a.py", "src/b.py", "src/c.py"]

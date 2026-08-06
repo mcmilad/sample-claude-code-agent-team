@@ -197,34 +197,52 @@ def main():
     if out_scope:
         lines.append("  Outside it (other spec/group -- confirm with the lead "
                      "before claiming): " + ", ".join(out_scope))
-    lines.append(
-        "These are candidates from the LOCAL MIRROR, which may be stale and is not "
-        "sprint-scoped. Re-run the sprint-scoped Find JQL from `jira-workflow` and "
-        "claim from that result, not from this list.")
+    stale = ("These are candidates from the LOCAL MIRROR, which may be stale and is not "
+             "sprint-scoped.")
 
     if role == "review":
         # Reviewers are partitioned by the lead's handoff, not by claiming, and
         # there is exactly one role-review card per sprint. Telling four
-        # reviewers to self-claim it would manufacture the collision.
+        # reviewers to self-claim it would manufacture the collision -- so the
+        # "re-run the Find JQL and claim from that result" redirect belongs in
+        # the else branch ONLY. Emitting it above this branch put "claim from
+        # that result" one line above "do NOT self-claim", and contradicted
+        # review-agent.md ("Do not run the role JQL").
+        lines.append(stale)
         lines.append(
             "You are a reviewer: do NOT self-claim. Your slice and your "
             "synthesizer/analyst role come from the lead's handoff, and the sprint's "
             "role-review card belongs to the synthesizer. If you have no slice, ask "
             "the lead.")
     else:
+        lines.append(stale + " Re-run the sprint-scoped Find JQL from `jira-workflow` "
+                     "and claim from that result, not from this list.")
         lines.append(
-            "To claim one -- the mkdir lock decides ownership, not the label:\n"
-            "  1. mkdir ~/.claude/logs/claims/{}/<ISSUE-KEY>  -- succeeds for exactly "
-            "one agent; if it fails you lost, pick another issue\n"
-            "  2. getJiraIssue(..., fields=[\"labels\",\"status\",\"summary\","
+            "To claim one -- the mkdir lock decides ownership, not the label. Bootstrap "
+            "the parent first: a bare mkdir of the issue directory fails with ENOENT on "
+            "a fresh $HOME, and you would misread that as having lost the race.\n"
+            "  CLAIMS=~/.claude/logs/claims/{p}; mkdir -p \"$CLAIMS\"\n"
+            "  if mkdir \"$CLAIMS/<ISSUE-KEY>\" 2>/dev/null; then\n"
+            "    echo \"<your-instance>\" > \"$CLAIMS/<ISSUE-KEY>/owner\"\n"
+            "    date -u +%Y-%m-%dT%H:%M:%SZ > \"$CLAIMS/<ISSUE-KEY>/heartbeat\"\n"
+            "  else\n"
+            "    echo \"LOST -- owned by $(cat \"$CLAIMS/<ISSUE-KEY>/owner\" "
+            "2>/dev/null)\"; fi\n"
+            "Only the second mkdir failing means you lost -- then pick another issue and "
+            "touch nothing. Never write owner/heartbeat unconditionally: on a lost race "
+            "that overwrites the winner's own record. The heartbeat file is what the "
+            "lead's stale-claim sweep reads (find ... -name heartbeat), so a lock "
+            "without one is invisible if you die mid-issue.\n"
+            "Once the lock is yours, and before you edit any file:\n"
+            "  1. getJiraIssue(..., fields=[\"labels\",\"status\",\"summary\","
             "\"description\",\"issuelinks\"])\n"
             "     -- an explicit list replaces the defaults, so it must include labels\n"
-            "  3. editJiraIssue fields.labels = <those labels> + ['agent-{}'], then "
-            "transitionJiraIssue to In Progress, then comment 'Claimed by {}.'\n"
-            "  4. re-read to confirm -- FAIL OPEN: an absent label with no competing "
+            "  2. editJiraIssue fields.labels = <those labels> + ['agent-{me}'], then "
+            "transitionJiraIssue to In Progress, then comment 'Claimed by {me}.'\n"
+            "  3. re-read to confirm -- FAIL OPEN: an absent label with no competing "
             "agent-* is an unconfirmed write, not a loss. You hold the lock; re-apply "
             "it. Never count agent-* labels to detect a race -- editJiraIssue replaces "
-            "the array, so only one ever survives.".format(project, teammate, teammate))
+            "the array, so only one ever survives.".format(p=project, me=teammate))
     lines.append("Or send the lead a one-line note that you are genuinely done. "
                  "(nudge {}/{})".format(count + 1, MAX_NUDGES))
 

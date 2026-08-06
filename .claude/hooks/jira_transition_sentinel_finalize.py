@@ -10,6 +10,13 @@ has actually returned:
   affirmative success -> delete it. The sentinel is spent.
   anything else       -> restore it to .verified, so the retry is not blocked.
 
+SCOPE: only for the transitions the gate actually consumes for, i.e. GATED
+ones. Gated-ness is resolved by importing the gate's own target_status() /
+is_gated() rather than re-deriving them, so the two phases of the consume
+cannot drift. A PostToolUse for an ungated transition (In Progress -- the
+documented claim step) is not the other half of any consume and must leave the
+sentinel strictly alone.
+
 BIAS ON AMBIGUITY: RESTORE. The failure this exists to fix was a *destroyed*
 sentinel permanently wedging a legitimate close (AGENT-11, 2026-08-05T05:47:48Z:
 the gate allowed and consumed, no transition ever landed, and the issue could
@@ -47,6 +54,7 @@ from team_hook_common import (  # noqa: E402
     read_payload, allow, audit, as_dict, safe_path_component, verified_dir,
 )
 import jira_mirror  # noqa: E402
+import jira_transition_verify_gate as verify_gate  # noqa: E402
 
 EVENT = "PostToolUse"
 TRANSITION = "mcp__plugin_atlassian_atlassian__transitionJiraIssue"
@@ -162,21 +170,42 @@ def main():
     if p.get("tool_name") != TRANSITION:
         allow()
 
+    tool_input = as_dict(p.get("tool_input"))
     cfg = jira_mirror.load_config()
     project = cfg.get("projectKey")
     if not project:
         allow(EVENT, p, reason="no projectKey configured -- nothing to finalize")
 
     issue_key = safe_path_component(
-        as_dict(p.get("tool_input")).get("issueIdOrKey"), default="_noissue"
+        tool_input.get("issueIdOrKey"), default="_noissue"
     )
     if jira_mirror.issue_project(issue_key) != project:
         allow(EVENT, p, reason="issue belongs to another project -- ignored")
 
+    # Only a GATED transition consumes a sentinel, so only a gated transition
+    # may finalize one. Resolved through the gate's own helpers so the two
+    # phases cannot drift. Without this check a PostToolUse for an UNGATED
+    # transition -- In Progress, the documented claim step, run on every issue
+    # -- adjudicates an .inflight it never created: on success it deletes a
+    # legitimate attestation (the next gated retry gets "no sentinel"), and on
+    # failure it restores one that is still in flight, so the gated call that
+    # then lands finds nothing to spend and a single attestation authorizes
+    # both In Review and Done.
+    #
+    # Unknown id, or config missing/changed -> target is None -> do nothing.
+    # Fail-open here means touch NOTHING: the gate fails open the same way, so
+    # it created no .inflight either, and if it did (config changed mid-flight)
+    # the file is stale-reclaimable rather than wrongly spent.
+    target = verify_gate.target_status(cfg, tool_input)
+    if not target or not verify_gate.is_gated(cfg, target):
+        allow(EVENT, p, reason=(
+            "transition of {} to {} is not gated -- no sentinel of ours to finalize"
+        ).format(issue_key, target or "<unknown>"))
+
     base = _base(project, issue_key)
     inflight = base + ".inflight"
     if not os.path.exists(inflight):
-        # Ungated transition (In Progress), skip-verify, or the gate failed open.
+        # skip-verify, or the gate failed open without consuming.
         allow(EVENT, p, reason="no in-flight sentinel for {} -- nothing to do".format(
             issue_key))
 
