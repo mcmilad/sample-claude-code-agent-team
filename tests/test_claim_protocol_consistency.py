@@ -438,28 +438,96 @@ def test_the_release_path_exists():
                         rel, line.strip()[:90]))
 
 
+# The sweep is stated in TWO copies, not one. SKILL.md:160-167 restates the
+# threshold, the posture, and the release gate, and every assertion here used to
+# read only the lead -- dropping the skill's copy to 25 minutes left all 310
+# tests green while leaving that file self-contradictory ("older than 25 minutes
+# (well clear of the ~29-minute legitimate verification pass...)").
+SWEEP_DOCS = (LEAD, SKILL)
+
+# The threshold in both notations the copies use: the lead's `find ... -mmin +60`
+# and the skill's prose "older than 60 minutes".
+SWEEP_THRESHOLD = re.compile(r"-mmin \+(\d+)|older than (\d+) minutes", re.I)
+
+# Polarity bound to its subject, and matched over `flat`, not `prose`.
+#
+# `never evidence of death|reason to look` was an alternation in which the second
+# half survives every inversion: rewriting the lead to "a reason to look, and firm
+# evidence of death" kept the suite green. Inversion is the likelier drift, too --
+# an editor rewriting the clause, not deleting the sentence -- and it reads as
+# authorization for exactly the takeover this section forbids.
+#
+# `flat` is required rather than cosmetic: SKILL.md wraps this sentence across two
+# lines, so `prose` (which strips emphasis but not newlines) cannot see it at all,
+# and the same reflow applied to the lead turned the old assertion red on a change
+# that altered no words.
+SWEEP_POSTURE = re.compile(
+    r"stale heartbeat[^.]{0,120}?\bnever\s+(?:positive\s+)?evidence of death", re.I)
+
+# The release gate. NOT load-bearing alone: this phrase survives a doc that
+# redefines the sweep hit AS positive evidence ("...and the sweep hit IS that
+# evidence"). What rejects that inversion is the posture above plus the takeover
+# prohibition below, so all three are asserted, not just this one.
+SWEEP_GATE = re.compile(r"only on positive evidence of death", re.I)
+
+# The operative prohibition behind G3, and nothing asserted it: flipping
+# `Never take the work over yourself` to `Take the work over yourself` left all
+# 310 tests green. Lead-only -- the skill hands the release to the lead, so only
+# the lead is told not to do the work itself.
+SWEEP_NO_TAKEOVER = re.compile(r"never take the work over yourself", re.I)
+
+
 def test_the_stale_sweep_is_investigate_only_and_clears_the_incident_threshold():
-    """The two highest-value properties of the sweep, and neither was guarded.
+    """Four properties of the sweep, across both copies that state them.
 
     The threshold exists because the incident that produced the liveness rule
     involved a legitimate ~29-minute verification pass; a threshold near that
-    length is a coin flip on the exact run the rule was written for. And the
-    posture matters more than the number: a stale heartbeat is the same object
-    as "no message in N minutes", which the lead's own non-negotiable rule names
-    as NOT positive evidence of death. Inverting either left the suite green.
+    length is a coin flip on the exact run the rule was written for. The posture
+    matters more than the number: a stale heartbeat is the same object as "no
+    message in N minutes", which the lead's own non-negotiable rule names as NOT
+    positive evidence of death.
+
+    Every one of these inversions left the suite green before this test: the
+    posture flipped to "firm evidence of death", the takeover prohibition flipped
+    to "Take the work over yourself", and the skill's threshold dropped to 25
+    minutes. Presence checks accept the negation of the thing they name, so each
+    assertion below binds the polarity rather than the keyword.
     """
-    body = prose(LEAD)
+    # Positive control on the loop itself, before it runs. Emptying SWEEP_DOCS
+    # makes every assertion below evaporate with the test still reporting PASS
+    # and the suite count UNCHANGED -- no skip marker, no summary line, nothing
+    # to notice. Measured: it survived the first mutation pass of this very fix.
+    assert LEAD in SWEEP_DOCS and SKILL in SWEEP_DOCS, (
+        "SWEEP_DOCS must carry both copies that state the sweep. A copy dropped "
+        "from it is a copy no longer checked, and nothing else here would fail.")
 
-    minutes = [int(m) for m in re.findall(r"-mmin \+(\d+)", body)]
-    assert minutes, "the lead must document the stale-claim sweep's find command"
-    assert all(m >= 60 for m in minutes), (
-        "stale-sweep threshold {} is at or below the ~29-minute legitimate "
-        "verification pass that motivated the liveness rule; 60 is the "
-        "documented floor".format(minutes))
+    for path in SWEEP_DOCS:
+        rel = os.path.relpath(path, REPO)
+        body = flat(path)
 
-    assert re.search(r"never evidence of death|reason to look", body, re.I), (
-        "fullstack-agent.md must state that a stale heartbeat is a reason to "
-        "INVESTIGATE and never evidence of death -- inverting that posture "
-        "re-authorises the takeover the liveness rule forbids")
-    assert re.search(r"only on positive evidence|positive evidence of death", body, re.I), (
-        "the release must be gated on positive evidence, not on the sweep alone")
+        # Positive control on the detector itself: a doc that states no
+        # threshold at all must fail here rather than pass an empty `all()`.
+        minutes = [int(a or b) for a, b in SWEEP_THRESHOLD.findall(body)]
+        assert minutes, (
+            "{} states no stale-sweep threshold -- it must carry either "
+            "`-mmin +<n>` or `older than <n> minutes`. An absent threshold "
+            "makes the `all()` below vacuously true.".format(rel))
+        assert all(m >= 60 for m in minutes), (
+            "{}: stale-sweep threshold {} is at or below the ~29-minute "
+            "legitimate verification pass that motivated the liveness rule; "
+            "60 is the documented floor".format(rel, minutes))
+
+        assert SWEEP_POSTURE.search(body), (
+            "{} must bind the negation to its subject -- 'a stale heartbeat "
+            "is ... never evidence of death'. A loose presence check passes "
+            "the INVERTED sentence, which re-authorises the takeover the "
+            "liveness rule forbids.".format(rel))
+        assert SWEEP_GATE.search(body), (
+            "{}: the release must be gated on positive evidence of death, "
+            "never on the sweep hit alone".format(rel))
+
+    assert SWEEP_NO_TAKEOVER.search(flat(LEAD)), (
+        "fullstack-agent.md must carry 'Never take the work over yourself'. It "
+        "is the operative prohibition behind G3 -- the release procedure exists "
+        "to hand the issue to a fresh instance, and without the prohibition the "
+        "same section reads as authorization to do the work yourself.")
