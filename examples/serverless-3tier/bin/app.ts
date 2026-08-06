@@ -18,6 +18,7 @@ const apiStack = new ApiStack(app, "ServerlessThreeTierApiStack", {
 const webStack = new WebStack(app, "ServerlessThreeTierWebStack", {
   apiUrl: apiStack.apiUrl,
   identityPoolId: apiStack.identityPoolId,
+  key: dataStack.key,
 });
 webStack.addStackDependency(apiStack);
 
