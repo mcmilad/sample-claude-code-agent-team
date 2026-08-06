@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 .claude/jira-config.json
 .claude/specs/*/jira-run.json
+.coverage
