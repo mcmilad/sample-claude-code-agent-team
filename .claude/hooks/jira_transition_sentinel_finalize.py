@@ -51,7 +51,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from team_hook_common import (  # noqa: E402
-    read_payload, allow, audit, as_dict, safe_path_component, verified_dir,
+    read_payload, allow, audit, as_dict, tool_input_of, safe_path_component,
+    verified_dir,
 )
 import jira_mirror  # noqa: E402
 import jira_transition_verify_gate as verify_gate  # noqa: E402
@@ -61,13 +62,23 @@ TRANSITION = "mcp__plugin_atlassian_atlassian__transitionJiraIssue"
 
 _ERROR_KEYS = ("error", "errors", "errorMessages", "errorMessage")
 
+# Issue keys are stripped before the prose scan. `AGENT-401 transitioned` is a
+# SUCCESS message, but the bare 4xx/5xx pattern matched the issue NUMBER, so
+# every issue numbered 400-599 read as an HTTP error -- roughly one in five of
+# them, scaling with the project, resurrecting sentinels that were spent.
+_ISSUE_KEY = re.compile(r"\b[A-Z][A-Z0-9_]*-\d+\b")
+
 # Substrings that mark an error rendered as prose. Deliberately broad: a false
 # "this failed" only restores a sentinel the agent had legitimately earned,
-# whereas a false "this succeeded" deletes it and wedges the issue.
+# whereas a false "this succeeded" deletes it and wedges the issue. The status
+# arm requires an explicit HTTP cue, because a bare three-digit number in prose
+# is far more often an id, a count, or a size than a status code.
 _ERROR_TEXT = re.compile(
     r"\b(error|errors|failed|failure|unauthor\w*|forbidden|not found|"
     r"invalid|denied|timeout|timed out|exception|rate limit)\b|"
-    r"\b(4\d\d|5\d\d)\b",
+    r"\b(?:http|status|code|response)\W{0,3}([45]\d\d)\b|"
+    r"\b([45]\d\d)\s+(?:bad|unauthorized|forbidden|not|method|conflict|gone|"
+    r"too|internal|server|service|gateway)\b",
     re.I,
 )
 
@@ -98,8 +109,15 @@ def _decode_content_blocks(response):
 
 
 def _structured_verdict(obj):
-    """Decide a decoded object. Explicit beats inferred."""
-    if any(k in obj for k in _ERROR_KEYS):
+    """Decide a decoded object. Explicit beats inferred.
+
+    Truthiness, not key PRESENCE: Jira and MCP wrappers routinely return empty
+    error containers on success (`{"errorMessages": [], "errors": {}}`), and
+    reading those as a failure restores a sentinel that was legitimately spent --
+    which permits a second gated transition, the exact property the sentinel
+    exists to guarantee. An empty container is the absence of an error.
+    """
+    if any(obj.get(k) for k in _ERROR_KEYS):
         return False
     # {"success": false} carries no error KEY but is unambiguously a failure;
     # reading it as success would delete a sentinel for a transition that never
@@ -162,7 +180,8 @@ def transition_succeeded(response):
     if isinstance(parsed, bool):
         return parsed
 
-    return not _ERROR_TEXT.search(text)
+    # Strip issue keys before the scan: their numeric half is not a status code.
+    return not _ERROR_TEXT.search(_ISSUE_KEY.sub("", text))
 
 
 def main():
@@ -170,7 +189,16 @@ def main():
     if p.get("tool_name") != TRANSITION:
         allow()
 
-    tool_input = as_dict(p.get("tool_input"))
+    # tool_input_of, NOT as_dict -- the two phases of one consume must read the
+    # same payload the same way. PreToolUse and PostToolUse carry the identical
+    # model-authored tool_input, so when the gate decodes a stringified one
+    # (verify_gate:133) and this hook discarded it, the gate would create an
+    # .inflight that the finalizer then failed to recognise as its own: it bailed
+    # at the project-scope check below logging "belongs to another project", and
+    # the orphaned .inflight authorized a second gated transition once the stale
+    # window elapsed. That asymmetry was introduced by the very commit that
+    # claimed "the two phases of the consume cannot drift".
+    tool_input, _unreadable = tool_input_of(p)
     cfg = jira_mirror.load_config()
     project = cfg.get("projectKey")
     if not project:
