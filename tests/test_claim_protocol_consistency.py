@@ -375,16 +375,31 @@ def test_the_release_path_exists():
     the stale label makes a same-named respawn look like the owner.
     """
     for path in (SKILL, LEAD):
-        body = prose(path)
         rel = os.path.relpath(path, REPO)
-        assert re.search(r"rm -rf\s+~?/?\.?claude/logs/claims|logs/claims/", body), (
-            "{}: the release must delete the claim lock, or the key can never "
-            "be retaken (mkdir keeps returning EEXIST)".format(rel))
-        assert re.search(r"remov\w*|minus|strip\w*", body, re.I) and "agent-" in body, (
-            "{}: the release must strip the dead agent-* label".format(rel))
-        assert re.search(r"To Do", body), (
-            "{}: the release must transition back to To Do -- the claim JQL "
-            "only returns that status".format(rel))
+
+        # Scoped to the release BLOCK, never the whole file. Matching the file
+        # made every one of these assertions inert: `rm -rf ~/.claude/logs/claims`
+        # also appears in the teardown step, and "To Do", "remov" and "agent-"
+        # appear throughout. Deleting all three release mechanics left the suite
+        # green -- the exact "a word is present" failure this file exists to stop.
+        body = prose(path)
+        start = body.find("logged release")
+        assert start != -1, (
+            "{}: no release block found -- it must be introduced by the phrase "
+            "'logged release', which is what anchors these assertions".format(rel))
+        # The block ends at the prose that follows its fenced commands.
+        end = body.find("Without the release", start)
+        block = body[start:end if end != -1 else start + 900]
+
+        assert re.search(r"rm -rf\s+\S*logs/claims/", block), (
+            "{}: the release must delete the claim lock, or the key can never be "
+            "retaken -- mkdir keeps returning EEXIST".format(rel))
+        assert re.search(r"labels\s*=\s*<labels minus|remove\w*\s+.{0,40}agent-\*", block), (
+            "{}: the release must strip the dead agent-* label, or a same-named "
+            "respawn passes every ownership check".format(rel))
+        assert re.search(r"transitionJiraIssue.{0,60}To Do|back to To Do", block), (
+            "{}: the release must transition back to To Do -- the claim JQL only "
+            "returns that status, so without it the issue stays unreachable".format(rel))
 
 
 def test_the_stale_sweep_is_investigate_only_and_clears_the_incident_threshold():

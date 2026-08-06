@@ -107,6 +107,28 @@ def test_holding_the_lock_allows_the_edit_even_when_the_board_lags(tmp_path):
     assert run(env, project).returncode == 0
 
 
+def test_a_locked_declarer_does_not_exempt_an_unclaimed_sibling(tmp_path):
+    """The lock-held branch must `continue`, never `return None`.
+
+    With a single declarer the two are indistinguishable, which is why this was
+    unpinned. It takes two declarers of the same path -- one properly locked, one
+    unclaimed -- to tell them apart: `continue` still reports the unclaimed one,
+    while `return None` exempts the file entirely on the strength of a DIFFERENT
+    issue's lock. The journal is append-only, so the exempting set only grows."""
+    env, home, project = setup(tmp_path)
+    journal(home, [
+        {"op": "create", "key": "AGENT-A", "status": "In Progress",
+         "labels": ["role-coding", "spec-x"], "files": ["src/login.py"]},
+        {"op": "create", "key": "AGENT-B", "status": "To Do",
+         "labels": ["role-coding", "spec-x"], "files": ["src/login.py"]},
+    ])
+    lock(home, "AGENT-A")
+    proc = run(env, project)
+    assert proc.returncode == 2, \
+        "a locked declarer must not launder an unclaimed sibling's file"
+    assert "AGENT-B" in proc.stderr
+
+
 def test_the_stop_budget_is_keyed_on_the_issue_not_the_session(tmp_path):
     """session_id is shared by a whole team -- 13 teammates in a real run
     reported one. Keyed on the session, 'block once' means one stop for the
