@@ -74,7 +74,7 @@ These are load-bearing and were verified against the live system, not assumed.
 | A7 | Reviewers are told not to self-claim | `pytest tests/test_skill_consistency.py` |
 | A8 | Overlapping `Files:` across issues in one scope is blocked at create | `pytest tests/hooks/test_jira_issue_format_check.py` |
 | A9 | `spec_gate` does not false-block a spawned teammate | `pytest tests/test_spec_gate.py` |
-| A10 | Whole suite green | `.venv/bin/python -m pytest tests/ -q` (baseline 197) |
+| A10 | Whole suite green | `.venv/bin/python -m pytest tests/` (baseline 197; `pytest.ini` already sets `-q`, so adding another makes it `-qq` and suppresses the pass count a verifier needs to read) |
 
 ## Out of scope for this spec
 

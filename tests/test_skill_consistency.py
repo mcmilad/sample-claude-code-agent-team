@@ -211,3 +211,47 @@ def test_skill_label_vocabulary_enforced_labels_are_all_hook_checked():
             token = _label_token(label)
             assert token in hook_tokens, \
                 "skill marks {} (label {}) as hook-enforced but no hook checks it".format(token, label)
+
+
+def test_documented_pytest_commands_do_not_suppress_the_pass_count():
+    """A `Run:` command must print a pass count, or a verifier cannot read it.
+
+    `pytest.ini` sets `addopts = -q`. A documented command that ALSO passes `-q`
+    therefore runs at `-qq`, which suppresses the summary line entirely -- so
+    "PASSED, 309 passed" cannot be quoted from it, and the sentinel that
+    authorizes a gated transition ends up attesting to output the command never
+    produced. The exit code is still correct, so nothing fails loudly; the
+    verification just quietly stops being legible.
+    """
+    import configparser
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ini = configparser.ConfigParser()
+    ini.read(os.path.join(repo, "pytest.ini"))
+    addopts = ini.get("pytest", "addopts", fallback="")
+    ini_quiet = "-q" in addopts.split()
+
+    if not ini_quiet:
+        return  # nothing to double up on
+
+    docs = [
+        os.path.join(repo, ".claude", "skills", "jira-workflow", "SKILL.md"),
+        os.path.join(repo, ".claude", "specs", "agent-claim-coordination", "spec.md"),
+    ]
+    offenders = []
+    for path in docs:
+        if not os.path.isfile(path):
+            continue
+        with open(path) as fh:
+            for n, line in enumerate(fh, 1):
+                # Only real invocations, not prose mentioning the flag.
+                for m in re.finditer(r"(?:^|[`\s])((?:[\w./-]*\s+)?-?m?\s*pytest\b[^`\n]*)",
+                                     line):
+                    cmd = m.group(1)
+                    if re.search(r"(?:^|\s)-q(?:\s|$)", cmd):
+                        offenders.append("{}:{}: {}".format(
+                            os.path.relpath(path, repo), n, cmd.strip()))
+    assert not offenders, (
+        "pytest.ini already sets `-q`; these documented commands add another, "
+        "making them `-qq` and suppressing the pass count:\n  " +
+        "\n  ".join(offenders))

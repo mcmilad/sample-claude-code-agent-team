@@ -209,7 +209,7 @@ Claimed by coding-2.
 
 **On verification:**
 ```
-Verification: `pytest tests/auth -q` PASSED
+Verification: `pytest tests/auth` PASSED
 14 passed in 2.1s
 ```
 

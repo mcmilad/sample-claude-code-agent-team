@@ -391,15 +391,51 @@ def test_the_release_path_exists():
         end = body.find("Without the release", start)
         block = body[start:end if end != -1 else start + 900]
 
-        assert re.search(r"rm -rf\s+\S*logs/claims/", block), (
-            "{}: the release must delete the claim lock, or the key can never be "
-            "retaken -- mkdir keeps returning EEXIST".format(rel))
-        assert re.search(r"labels\s*=\s*<labels minus|remove\w*\s+.{0,40}agent-\*", block), (
-            "{}: the release must strip the dead agent-* label, or a same-named "
-            "respawn passes every ownership check".format(rel))
-        assert re.search(r"transitionJiraIssue.{0,60}To Do|back to To Do", block), (
-            "{}: the release must transition back to To Do -- the claim JQL only "
-            "returns that status, so without it the issue stays unreachable".format(rel))
+        # Commented-out lines are not instructions. `# never run: rm -rf ...`
+        # satisfied a bare search, so a disabled command read as a live one.
+        live = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
+
+        for pattern, why in (
+            (r"rm -rf\s+\S*logs/claims/",
+             "delete the claim lock, or the key can never be retaken -- mkdir "
+             "keeps returning EEXIST"),
+            # `prose()` strips '*', so an `agent-\*` alternative here could never
+            # match and was dead code. Matched against the stripped form.
+            (r"labels\s*=\s*<labels minus|remov\w+\s+.{0,40}agent-",
+             "strip the dead agent-* label, or a same-named respawn passes every "
+             "ownership check"),
+            (r"transitionJiraIssue.{0,60}To Do|back to To Do",
+             "transition back to To Do -- the claim JQL only returns that status, "
+             "so without it the issue stays unreachable"),
+            # Acceptance names FOUR mechanics. The comment is the audit trail:
+            # a release with no recorded evidence is indistinguishable from the
+            # takeover the liveness rule forbids.
+            (r"addCommentToJiraIssue\(.{0,30}Released from",
+             "comment the evidence -- an unrecorded release is indistinguishable "
+             "from an unauthorised takeover"),
+        ):
+            assert re.search(pattern, live), (
+                "{}: the release must {}".format(rel, why))
+
+        # A guard that accepts the INVERTED instruction is worse than none:
+        # "Do NOT transition it back to To Do" satisfied the clause above,
+        # because these assertions only check that a step is PRESENT.
+        #
+        # Line-scoped, and only for lines that actually carry a mechanic. A
+        # block-wide search spans the fenced commands and fires on the wholly
+        # legitimate "Never take the work over yourself" -- which is an
+        # instruction the liveness rule requires, not a negated release step.
+        NEGATED = re.compile(r"\b(?:do not|don't|never|must not|no longer)\b", re.I)
+        MECHANIC = re.compile(
+            r"rm -rf\s+\S*logs/claims/|transitionJiraIssue|back to To Do|"
+            r"labels\s*=\s*<labels minus|addCommentToJiraIssue", re.I)
+        for line in live.splitlines():
+            if MECHANIC.search(line) and NEGATED.search(line):
+                raise AssertionError(
+                    "{}: a release mechanic is stated in the NEGATIVE -- {!r}. "
+                    "The presence assertions above would still pass, so an "
+                    "inverted procedure would ship unnoticed.".format(
+                        rel, line.strip()[:90]))
 
 
 def test_the_stale_sweep_is_investigate_only_and_clears_the_incident_threshold():
