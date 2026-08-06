@@ -361,12 +361,54 @@ def test_reviewers_are_told_not_to_self_claim():
     )
 
 
+LEAD = os.path.join(REPO, ".claude", "agents", "fullstack-agent.md")
+
+
 def test_the_release_path_exists():
     """Without an explicit release, an issue orphaned at In Progress is
-    unreachable: it is invisible to the claim JQL and to the idle check."""
-    for path in (SKILL, os.path.join(REPO, ".claude", "agents", "fullstack-agent.md")):
+    unreachable: it is invisible to the claim JQL and to the idle check.
+
+    A `/releas/i` grep is not a guard -- the word survives every inversion of the
+    procedure. The three steps that make an orphan reclaimable are asserted
+    individually, because omitting any one of them leaves it stuck: the lock
+    keeps the key un-retakeable, the status keeps it out of the claim JQL, and
+    the stale label makes a same-named respawn look like the owner.
+    """
+    for path in (SKILL, LEAD):
         body = prose(path)
-        assert re.search(r"releas", body, re.I), (
-            "{} must document returning an abandoned claim to the pool".format(
-                os.path.relpath(path, REPO))
-        )
+        rel = os.path.relpath(path, REPO)
+        assert re.search(r"rm -rf\s+~?/?\.?claude/logs/claims|logs/claims/", body), (
+            "{}: the release must delete the claim lock, or the key can never "
+            "be retaken (mkdir keeps returning EEXIST)".format(rel))
+        assert re.search(r"remov\w*|minus|strip\w*", body, re.I) and "agent-" in body, (
+            "{}: the release must strip the dead agent-* label".format(rel))
+        assert re.search(r"To Do", body), (
+            "{}: the release must transition back to To Do -- the claim JQL "
+            "only returns that status".format(rel))
+
+
+def test_the_stale_sweep_is_investigate_only_and_clears_the_incident_threshold():
+    """The two highest-value properties of the sweep, and neither was guarded.
+
+    The threshold exists because the incident that produced the liveness rule
+    involved a legitimate ~29-minute verification pass; a threshold near that
+    length is a coin flip on the exact run the rule was written for. And the
+    posture matters more than the number: a stale heartbeat is the same object
+    as "no message in N minutes", which the lead's own non-negotiable rule names
+    as NOT positive evidence of death. Inverting either left the suite green.
+    """
+    body = prose(LEAD)
+
+    minutes = [int(m) for m in re.findall(r"-mmin \+(\d+)", body)]
+    assert minutes, "the lead must document the stale-claim sweep's find command"
+    assert all(m >= 60 for m in minutes), (
+        "stale-sweep threshold {} is at or below the ~29-minute legitimate "
+        "verification pass that motivated the liveness rule; 60 is the "
+        "documented floor".format(minutes))
+
+    assert re.search(r"never evidence of death|reason to look", body, re.I), (
+        "fullstack-agent.md must state that a stale heartbeat is a reason to "
+        "INVESTIGATE and never evidence of death -- inverting that posture "
+        "re-authorises the takeover the liveness rule forbids")
+    assert re.search(r"only on positive evidence|positive evidence of death", body, re.I), (
+        "the release must be gated on positive evidence, not on the sweep alone")
