@@ -69,11 +69,17 @@ DEAD_TIEBREAK = re.compile(
 # Per-line matching keeps a copy free to spell the path as `$CLAIMS` or in full,
 # and survives the backslash-escaped quotes a Python string literal adds -- but
 # it cannot survive a dropped or reordered step.
+# `>\s+`, never `>\s*`. Every copy renders the issue directory as the literal
+# `<ISSUE-KEY>`, whose closing angle bracket is immediately followed by `/owner`
+# -- so `>\s*\S*owner` matched the LOSING branch's `$(cat ".../owner")` read and
+# the owner WRITE went unpinned in five of the six copies. Requiring whitespace
+# after the redirect distinguishes the write (`> "$CLAIMS/<ISSUE-KEY>/owner"`)
+# from both that read and from `2>/dev/null`.
 STEPS = (
     ("bootstrap the claims parent with `mkdir -p`", r"mkdir\s+-p\b"),
     ("take the lock with a bare, atomic `mkdir`", r"mkdir\s+(?!-p\b)\S"),
-    ("record the lock's `owner`", r">\s*\S*owner"),
-    ("record a `heartbeat` for the lead's sweep", r">\s*\S*heartbeat"),
+    ("record the lock's `owner`", r">\s+\S*owner"),
+    ("record a `heartbeat` for the lead's sweep", r">\s+\S*heartbeat"),
 )
 
 
@@ -190,15 +196,33 @@ def test_no_copy_writes_owner_or_heartbeat_outside_the_won_branch():
     owner's record and re-stamps its heartbeat, destroying the one signal the
     stale-claim sweep reads. The write must sit inside the `if mkdir` branch."""
     for path in ALL_COPIES:
+        rel = os.path.relpath(path, REPO)
         bootstrap, lock, owner, heartbeat = _step_lines(path)
         assert lock < owner and lock < heartbeat, (
-            "{}: owner/heartbeat are written before the lock is won".format(
-                os.path.relpath(path, REPO)))
-        body = read(path)
-        assert re.search(r"if mkdir", body), (
+            "{}: owner/heartbeat are written before the lock is won".format(rel))
+
+        # Containment, not just ordering. Asserting `if mkdir` appears SOMEWHERE
+        # passes a copy whose guard block is inert and whose writes sit after the
+        # closing `fi` -- which is precisely the unconditional write this test is
+        # named for. The writes must fall inside the won branch: after the `if`,
+        # and before whatever ends it.
+        lines = read(path).splitlines()
+        guard = next((i for i, l in enumerate(lines) if re.search(r"if mkdir", l)), -1)
+        assert guard != -1, (
             "{} must guard the owner/heartbeat writes with `if mkdir ...`; an "
             "unconditional write corrupts the winner's record on a lost "
-            "race".format(os.path.relpath(path, REPO)))
+            "race".format(rel))
+        closer = next(
+            (i for i, l in enumerate(lines)
+             if i > guard and re.search(r"^\s*(?:else\b|fi\b)|\belse\b|;\s*fi\b", l)),
+            len(lines))
+        for label, idx in (("owner", owner), ("heartbeat", heartbeat)):
+            assert guard < idx < closer, (
+                "{}: the {} write (line {}) is outside the `if mkdir` branch "
+                "(lines {}..{}). On a LOST race an unconditional write "
+                "overwrites the true owner's record and re-stamps its "
+                "heartbeat, destroying the one signal the stale-claim sweep "
+                "reads.".format(rel, label, idx + 1, guard + 1, closer + 1))
 
 
 def test_no_copy_teaches_the_unreachable_tiebreak():
