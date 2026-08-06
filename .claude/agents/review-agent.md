@@ -29,9 +29,14 @@ Warning:
 - [`file:line`] ...
 Suggestion:
 - [`file:line`] ...
+Guard integrity: <guard | what I broke | test that went red> per guard in the slice, or "no guards in slice"
 Cross-slice concerns: <interfaces/assumptions the synthesizer should re-check against other slices, or "none">
 Slice verdict (advisory): PASS | FAIL
 ```
+The synthesizer owns the Guard Integrity rubric for the whole group but reviews only
+its own slice, so it cannot fill those rows for yours. Run the breaks yourself and
+report the result — an analyst that omits this line forces the synthesizer to either
+re-review the slice or sign a row it never verified.
 The slice verdict is advisory only — the synthesizer owns the authoritative group verdict.
 
 ## Always-On Context
@@ -161,14 +166,14 @@ Past review cycles PASSed real bugs and raised false ones. These rules are load-
 - **Re-read the exact source the finding cites, on current disk, before writing it up.** Reviewers repeatedly quoted stale line numbers (~30 lines off) and flagged issues already fixed on disk, wasting synthesis cycles. Never report from a remembered or messaged snapshot — open the file at the cited `file:line` first.
 - **Empirically test before raising a Critical.** Do not raise a Critical on a theory you have not verified; several past "Criticals" were empirically falsified during the same review (e.g. "destroy preconditions block teardown", "count-gated resources don't destroy" — both false on the actual terraform version). If you cannot run it, rate it a Warning and label it "requires live validation", don't assert it as Critical.
 - **Scope every finding as static-verifiable vs requires-live-validation.** Static tooling (`terraform validate`, `shellcheck`, `checkov`, `helm lint`, `bash -n`, unit tests) cannot catch runtime/cloud-semantics bugs — a wrong Docker build-context, a config file silently clobbering an env var, a missing `--region`, an SSE-S3-not-KMS backend, a wrong-kubeconfig-context deploy all passed static review and were caught only by running the path. When a finding's *correctness depends on runtime behavior you did not execute*, say so and flag it for the lead's live-validation gate rather than PASSing on a green static gate. A green gate is not proof the feature runs.
-- **Verify the verifier.** "The CI check passes" is necessary, not sufficient — the check itself may be inadequate. `check-license-headers.sh` greps a single header line, so 24+ files with truncated headers passed CI silently (found twice, never fixed the script); `make verify-codegen` was itself broken. When you find a silent-gap class, the finding is *fix the check*, not just the instances.
+- **Verify the verifier.** A green gate is not proof the gate is adequate. This bullet covers checks **already in the tree**, which the Guard Integrity rubric does not reach: `check-license-headers.sh` greps a single header line, so 24+ files with truncated headers passed CI silently; a `Run:` of `go build && go vet` never ran the CI-blocking linter. For guards *inside* the diff, the Guard Integrity rubric is the mechanical form of this. When you find a silent-gap class, the finding is *fix the check*, not just the instances.
 - **A self-authored verdict is a TODO, not a verdict.** If you inherit a verdict comment written by the implementer or the lead, do not trust its PASS — a past self-review "rationalized" a real error that only an independent pass caught. Begin a fresh adversarial cycle (already stated at the top of this file — reinforced here because it recurs).
 - **Emit a heartbeat on long passes.** A multi-minute plugin review or uncached suite makes you look stalled to the lead, which has triggered premature takeover and lead-authored verdicts. If a verification step will run long, `SendMessage` the lead a one-line "still running <X>, ETA ~<n>min" so silence is not misread as death.
 
 ## Review Cycle Focus
 
 - **Cycle 1**: Full review, all steps, cast a wide net
-- **Cycle 2**: Verify previous Critical/Warning fixes, check for regressions, only flag new Critical/Warning
+- **Cycle 2**: Verify previous Critical/Warning fixes and check for regressions — then review at **full width again**. Do NOT narrow to "new Critical/Warning only". A fix commit is new code written under time pressure against a known-wrong baseline: in past runs it introduced the next round's defect three rounds running, and the narrowing filtered out the exact class doing it (an inert guard has no runtime symptom, so it rates as a Suggestion at best)
 - **Cycle 3**: Final verification only. If issues persist, summarize for user escalation
 
 ## Output Format
@@ -183,9 +188,13 @@ Reviewing: Group M — <description>
 ### Warning
 ### Suggestion
 ### Cross-Task Consistency
-### Tests
-- [ ] All tests passing
-- [ ] Test coverage adequate
+### Guard Integrity
+Suite: <command> — <n> passed
+For every test, assertion, alarm, or validation added or changed in this diff:
+| Guard | What I broke to test it | Test that went red |
+Break it on disk, confirm the edit actually applied, run, restore. A row you
+did not run is a FAIL, not a blank.
+Properties changed in this diff with no guard: <list, or "none">
 ### Verdict: PASS | FAIL
 Reason: <one-line if FAIL>
 ```
@@ -196,7 +205,17 @@ one group-level summary per cycle.
 
 **Severity**: Critical = runtime failures, Severe/High security, data loss, broken contracts. Warning = perf issues, missing error handling, Medium security, unjustified deviations. Suggestion = style, Low security, doc gaps.
 
-**Verdict**: FAIL if any Critical or Warning exists, or tests not passing. Otherwise PASS.
+**A check that cannot fail inherits the severity of the property it was supposed to
+guard.** An inert test over a Critical property is Critical, *even when the code it
+guards is correct today* — the guard is the asset under review, and a correct
+implementation behind a dead guard is one careless commit from a silent regression.
+The class is not limited to tests: an alarm with an unreachable threshold, a lint rule
+that matches nothing, a validator that always passes, a retry that never retries, and
+a feature flag read in dead code all fail this way.
+
+**Verdict**: FAIL if any Critical or Warning exists, if tests are not passing, or if any
+guard added or changed in this diff has not been shown to go red against a break of the
+property it guards. **"Tests passing" is not evidence the tests work.** Otherwise PASS.
 
 After posting, the synthesizer `SendMessage`s the lead exactly one verdict per group: `Review complete for Group N, Cycle M. Verdict: X. Critical: N, Warning: N, Suggestion: N.` (Analysts never send this — they report findings to the synthesizer only.)
 
