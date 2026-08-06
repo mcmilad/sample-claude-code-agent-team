@@ -60,7 +60,11 @@ import jira_transition_verify_gate as verify_gate  # noqa: E402
 EVENT = "PostToolUse"
 TRANSITION = "mcp__plugin_atlassian_atlassian__transitionJiraIssue"
 
-_ERROR_KEYS = ("error", "errors", "errorMessages", "errorMessage")
+# `isError` is MCP's own failure flag. Omitting it meant {"isError": true, ...}
+# classified as SUCCESS and SPENT the sentinel. Adding it is safe in the absent
+# case (truthiness, so a missing or false flag changes nothing) and errs toward
+# restore, which is the module's documented bias.
+_ERROR_KEYS = ("error", "errors", "errorMessages", "errorMessage", "isError")
 
 # Issue keys are stripped before the prose scan. `AGENT-401 transitioned` is a
 # SUCCESS message, but the bare 4xx/5xx pattern matched the issue NUMBER, so
@@ -68,17 +72,23 @@ _ERROR_KEYS = ("error", "errors", "errorMessages", "errorMessage")
 # them, scaling with the project, resurrecting sentinels that were spent.
 _ISSUE_KEY = re.compile(r"\b[A-Z][A-Z0-9_]*-\d+\b")
 
-# Substrings that mark an error rendered as prose. Deliberately broad: a false
-# "this failed" only restores a sentinel the agent had legitimately earned,
-# whereas a false "this succeeded" deletes it and wedges the issue. The status
-# arm requires an explicit HTTP cue, because a bare three-digit number in prose
-# is far more often an id, a count, or a size than a status code.
+# Substrings that mark an error rendered as prose. Deliberately BROAD, and the
+# bare 4xx/5xx arm stays broad on purpose: a false "this failed" only restores a
+# sentinel the agent legitimately earned, while a false "this succeeded" deletes
+# it and wedges the issue -- the AGENT-11 failure. Bare prose is the live
+# tool_response shape for transitions, so this is the primary path, not an edge.
+#
+# An earlier attempt narrowed this arm to require an explicit HTTP cue, to stop
+# it matching issue NUMBERS. That was a regression and is reverted: it let
+# "Received 403 from Jira", "The request returned 400.", "Transition rejected
+# (409)", "Jira responded 502" and "429 - slow down" all read as SUCCESS. The
+# narrowing was redundant as well as harmful -- stripping issue keys before the
+# scan (see transition_succeeded) already solves the issue-number problem, and
+# does so without weakening error detection.
 _ERROR_TEXT = re.compile(
     r"\b(error|errors|failed|failure|unauthor\w*|forbidden|not found|"
     r"invalid|denied|timeout|timed out|exception|rate limit)\b|"
-    r"\b(?:http|status|code|response)\W{0,3}([45]\d\d)\b|"
-    r"\b([45]\d\d)\s+(?:bad|unauthorized|forbidden|not|method|conflict|gone|"
-    r"too|internal|server|service|gateway)\b",
+    r"\b([45]\d\d)\b",
     re.I,
 )
 
@@ -92,9 +102,17 @@ def _base(project, issue_key):
 
 
 def _decode_content_blocks(response):
-    """MCP results often arrive as [{'type':'text','text':'<json>'}]."""
+    """MCP results often arrive as [{'type':'text','text':'<json>'}].
+
+    Returns the first block carrying an ERROR if any does, otherwise the first
+    decodable object. First-block-wins was wrong here: a response whose leading
+    block is clean and whose second reports the failure classified as SUCCESS
+    and SPENT the sentinel, against this module's documented restore bias. An
+    error anywhere in the response is an error.
+    """
     if not isinstance(response, list) or not response:
         return None
+    first = None
     for item in response:
         text = as_dict(item).get("text")
         if not isinstance(text, str):
@@ -103,9 +121,13 @@ def _decode_content_blocks(response):
             parsed = json.loads(text)
         except Exception:
             continue
-        if isinstance(parsed, dict):
+        if not isinstance(parsed, dict):
+            continue
+        if any(parsed.get(k) for k in _ERROR_KEYS):
             return parsed
-    return None
+        if first is None:
+            first = parsed
+    return first
 
 
 def _structured_verdict(obj):

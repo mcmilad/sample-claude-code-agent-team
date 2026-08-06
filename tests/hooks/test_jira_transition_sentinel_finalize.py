@@ -178,3 +178,59 @@ def test_the_finalizer_fails_open_on_hostile_input(tmp_path):
         proc = subprocess.run([sys.executable, FINALIZE], input=payload,
                               capture_output=True, text=True, env=env)
         assert proc.returncode in (0, 2), (payload, proc.returncode, proc.stderr)
+
+
+def test_bare_prose_http_errors_are_failures_without_needing_a_cue_word():
+    """Regression guard. An attempt to stop the 4xx/5xx arm matching issue
+    NUMBERS narrowed it to require an explicit HTTP cue -- and let six realistic
+    failures read as SUCCESS, deleting the sentinel for transitions that never
+    landed. Bare prose is the live tool_response shape, so this is the primary
+    path. The narrowing was redundant too: stripping issue keys before the scan
+    already solves the issue-number problem."""
+    m = finalize_module()
+    for text in ("Received 403 from Jira",
+                 "The request returned 400.",
+                 "Transition rejected (409)",
+                 "Jira responded 502",
+                 "429 - slow down",
+                 "Issue AGENT-14 could not be transitioned: 400"):
+        assert m.transition_succeeded(text) is False, text
+
+
+def test_issue_key_stripping_is_what_protects_the_issue_number():
+    """Pins the stripping itself, not a side effect of some other guard.
+
+    Previously this property passed off the narrowed regex, so deleting
+    _ISSUE_KEY.sub left the whole suite green and the sub read as dead code --
+    a future cleanup would have silently removed CODE-404/STATUS-500 protection.
+    With the broad arm restored the sub is the only thing standing between an
+    issue number and a false failure."""
+    m = finalize_module()
+    # Every one of these is a SUCCESS message whose only 4xx/5xx digits live
+    # inside an issue key. Without the strip, the broad arm matches all of them.
+    for text in ("Issue AGENT-401 transitioned to In Review",
+                 "AGENT-512 moved to Done",
+                 "CODE-404 transitioned",
+                 "STATUS-500 transitioned",
+                 "HTTP-503 transitioned"):
+        assert m.transition_succeeded(text) is True, text
+
+
+def test_mcp_is_error_flag_is_a_failure():
+    """MCP's own failure flag. Omitting it from _ERROR_KEYS meant an errored
+    call classified as SUCCESS and SPENT the sentinel."""
+    m = finalize_module()
+    assert m._structured_verdict({"isError": True, "content": []}) is False
+    assert m._structured_verdict({"isError": False, "ok": 1}) is True
+    assert m._structured_verdict({"ok": 1}) is True
+
+
+def test_an_error_in_any_content_block_is_a_failure():
+    """First-block-wins let a response whose leading block is clean and whose
+    second reports the failure classify as SUCCESS -- against this module's
+    documented restore bias."""
+    m = finalize_module()
+    assert m.transition_succeeded(
+        [{"text": '{"ok": 1}'}, {"text": '{"errorMessages": ["boom"]}'}]) is False
+    assert m.transition_succeeded(
+        [{"text": '{"ok": 1}'}, {"text": '{"also": "fine"}'}]) is True
