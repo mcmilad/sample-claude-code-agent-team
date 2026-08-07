@@ -38,6 +38,17 @@ export class WebStack extends Stack {
     // Separate from the SPA bucket, encrypted, fully private. Receives both
     // CloudFront standard logs and the SPA bucket's own S3 server access
     // logs.
+    //
+    // SSE-S3 here is deliberate, not an oversight -- do not "fix" this to
+    // the shared CMK. CloudFront standard logging does not support an
+    // SSE-KMS-encrypted destination bucket: pointing a distribution's
+    // `logBucket` at one does not error, it just silently delivers no
+    // logs at all. Putting this bucket on the CMK would read as more
+    // consistent with the SPA bucket, but it would trade a working audit
+    // trail for a cosmetically stronger setting, with nothing here to
+    // catch the loss (no test asserts that logs actually arrive). See
+    // design.md's Encryption-at-rest bullet, which documents the same
+    // constraint.
     const logBucket = new Bucket(this, "AccessLogBucket", {
       blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
       encryption: BucketEncryption.S3_MANAGED,
