@@ -126,10 +126,14 @@ stub by monkeypatching the module attribute — no moto, no network.
 ## Data Model
 
 One item per link. **These attribute names are part of the contract**, not an
-implementation detail — `create_handler` writes them and `redirect_handler` reads them, and
-because both handlers stub `boto3` in their unit tests, **no test on either side can catch a
-mismatch between them.** A rename on one side alone produces a suite that is fully green and
-a service that returns 500 on every redirect.
+implementation detail — `create_handler` writes them and `redirect_handler` reads them.
+
+Each side does pin the literal attribute name against its own fixture, so a **one-sided**
+rename is caught: renaming `url` in `create_handler` alone turns 2 tests red, and in
+`redirect_handler` alone turns 1 red. What no test can catch is **coordinated** drift — both
+handlers renamed together, consistently, away from what the table actually holds. Because
+both stub `boto3`, nothing in the unit suite ever compares either handler against a real
+item.
 
 | Attribute | Type | Written by | Notes |
 |---|---|---|---|

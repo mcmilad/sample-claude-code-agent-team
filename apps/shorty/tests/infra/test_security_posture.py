@@ -55,22 +55,89 @@ _ACCOUNT_ID_RE = re.compile(r"\b\d{12}\b")
 _REGION_RE = re.compile(r"\b(?:us|eu|ap|ca|sa|me|af|il|cn)-[a-z]+-\d\b")
 
 
+def _walk_policy_documents(node: object):
+    """Recursively yield every statement found under a literal "PolicyDocument"
+    key anywhere in a CFN resource (sub)tree.
+
+    Structural, not resource-type-based, on purpose (AGENT-88 -- the original
+    sweep enumerated only `AWS::IAM::Policy`, which is blind to two other
+    CDK-rendered shapes for the exact same kind of statement):
+      - `AWS::IAM::Policy`            -> Properties.PolicyDocument
+      - `AWS::IAM::ManagedPolicy`     -> Properties.PolicyDocument
+      - `AWS::IAM::Role`              -> Properties.Policies[].PolicyDocument
+        (from `iam.Role(..., inline_policies=...)`)
+    All three render the permission document under the identical CFN property
+    key "PolicyDocument". Walking for that key covers all three -- and any
+    future CDK rendering path that reuses the same CFN property name -- by
+    construction, instead of by enumerating resource types and hoping the
+    list stays exhaustive.
+
+    Deliberately EXCLUDED, and named here so the exclusion reads as a
+    decision rather than an accident:
+      - `AWS::IAM::Role.Properties.AssumeRolePolicyDocument` -- the trust
+        policy (who may assume the role), a different security question
+        than what the role is permitted to do. Its CFN key is literally
+        "AssumeRolePolicyDocument", not "PolicyDocument", so it is skipped
+        by this walk without special-casing.
+      - `AWS::KMS::Key.Properties.KeyPolicy` -- CDK's default key policy
+        grants `kms:*` on `Resource: "*"` to the account-root principal,
+        which is the standard, legitimate way KMS key policies work; key
+        policies are not IAM policies and this suite does not assess least
+        privilege on them. Its CFN key is "KeyPolicy", also skipped by the
+        same mechanism.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "PolicyDocument" and isinstance(value, dict):
+                yield from _normalize_statement(value.get("Statement"))
+            else:
+                yield from _walk_policy_documents(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk_policy_documents(item)
+
+
+def _normalize_statement(statement: object):
+    """CloudFormation permits `PolicyDocument.Statement` to be either a list
+    or a single object -- AGENT-88 cycle 2: the first version of this walk
+    only handled the list form and silently dropped a single-object
+    Statement, so a wildcard expressed that way passed the entire suite.
+    Handle both, and raise on anything else rather than silently skipping it
+    -- an unrecognized shape here is exactly the kind of gap this file
+    exists to not have.
+    """
+    if isinstance(statement, list):
+        yield from statement
+    elif isinstance(statement, dict):
+        yield statement
+    elif statement is not None:
+        raise TypeError(f"unexpected PolicyDocument.Statement shape: {statement!r}")
+
+
 def _all_policy_statements() -> list[dict]:
     statements = []
     for template in (_DATA_TEMPLATE, _APP_TEMPLATE):
-        for policy in template.find_resources("AWS::IAM::Policy").values():
-            statements.extend(policy["Properties"]["PolicyDocument"]["Statement"])
+        statements.extend(_walk_policy_documents(template.to_json()["Resources"]))
     return statements
 
 
 def _role_policy_statements(role_id_prefix: str) -> list[dict]:
     roles = _APP_TEMPLATE.find_resources("AWS::IAM::Role")
     (role_logical_id,) = [lid for lid in roles if lid.startswith(role_id_prefix)]
+    role_ref = {"Ref": role_logical_id}
 
     statements = []
-    for policy in _APP_TEMPLATE.find_resources("AWS::IAM::Policy").values():
-        if {"Ref": role_logical_id} in policy["Properties"].get("Roles", []):
-            statements.extend(policy["Properties"]["PolicyDocument"]["Statement"])
+    cfn = _APP_TEMPLATE.to_json()
+    for logical_id, resource in cfn["Resources"].items():
+        properties = resource.get("Properties", {})
+        # A statement belongs to this role either because the role's own
+        # resource carries it (inline `Properties.Policies`), or because a
+        # standalone AWS::IAM::Policy / AWS::IAM::ManagedPolicy resource
+        # attaches to it via its Roles list.
+        is_this_role = logical_id == role_logical_id
+        attaches_to_this_role = role_ref in properties.get("Roles", [])
+        if is_this_role or attaches_to_this_role:
+            statements.extend(_walk_policy_documents(properties))
     return statements
 
 
@@ -205,6 +272,26 @@ def test_neither_function_carries_any_env_var_other_than_table_name():
         variables = fn["Properties"]["Environment"]["Variables"]
         assert set(variables.keys()) == {"TABLE_NAME"}, (
             f"{logical_id} environment: {list(variables.keys())!r}"
+        )
+
+
+def test_neither_lambda_role_has_an_attached_managed_policy():
+    # AGENT-88: an AWS-managed policy attached via `role.add_managed_policy(...)`
+    # renders as a ManagedPolicyArns entry on the role, with no inline
+    # Statement for the wildcard sweep above to catch -- ManagedPolicyArns
+    # presence is the only thing that CAN be asserted against it.
+    # Mutation-tested: attaching ManagedPolicyName("AdministratorAccess") to
+    # both roles must fail this test (see AGENT-88 completion comment).
+    roles = _APP_TEMPLATE.find_resources("AWS::IAM::Role")
+    for role_prefix in ("CreateFnRole", "RedirectFnRole"):
+        (role_logical_id,) = [lid for lid in roles if lid.startswith(role_prefix)]
+        managed_policy_arns = roles[role_logical_id]["Properties"].get(
+            "ManagedPolicyArns"
+        )
+        assert not managed_policy_arns, (
+            f"{role_logical_id} has ManagedPolicyArns attached: "
+            f"{managed_policy_arns!r} -- an attached AWS-managed policy "
+            "grants permissions the statement-level wildcard sweep cannot see"
         )
 
 

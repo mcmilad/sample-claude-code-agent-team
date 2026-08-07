@@ -67,16 +67,7 @@ jobs:
         run: ./.venv/bin/ruff check .
 
       - name: pytest
-        run: |
-          set +e
-          ./.venv/bin/pytest
-          status=$?
-          set -e
-          if [ "$status" -eq 5 ]; then
-            echo "::notice::No tests collected yet -- scaffold-only commit."
-            exit 0
-          fi
-          exit "$status"
+        run: ./.venv/bin/pytest
 
       - name: cdk synth (offline -- no AWS credentials provided)
         run: npx --yes aws-cdk@2 synth --quiet

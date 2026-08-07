@@ -46,6 +46,21 @@ malformed probes cost nothing; no reflection of caller input into any response b
 front of the API is the cheaper of the two compliance paths and also buys caching on the
 redirect route.
 
+**The full ledger, added after review (finding S-6).** WAF is not the only thing HTTP API
+gives up versus REST API. Choosing v2 also forfeits:
+
+| Capability | REST (v1) | HTTP (v2) |
+|---|---|---|
+| AWS WAF web ACL | Yes | **No** |
+| Resource policies (source-IP / VPC-endpoint restriction) | Yes | **No** |
+| Request validators (body / query / path) | Yes | **No** |
+
+Neither of the additional two matters for Shorty — there is no private-API or source-IP
+requirement, and both handlers validate their own input explicitly rather than delegating to
+a gateway validator. Recorded because D-002 as originally written implied WAF was the sole
+cost, and anyone re-evaluating the tier-1 choice later needs the whole ledger rather than the
+one item that happened to trip a guideline check.
+
 ---
 
 ## D-003 — URL validation does not resolve DNS
@@ -241,3 +256,46 @@ that review had just caught.
 place *before* the blocking issue can reach `In Review`. Spawn timing enforces nothing.
 Equivalently — an issue's acceptance criteria must be final before it is claimable, because
 editing a claimed or completed issue's criteria does not retroactively change the work.
+
+---
+
+## D-011 — A guard must be tested against the shapes it does *not* cover
+
+**Date:** 2026-08-08 · **By:** review-1 (finding C-1), confirmed by the lead ·
+**Status:** Accepted (process correction)
+
+The IAM least-privilege sweep in `test_security_posture.py` and `test_app_stack.py`
+enumerated `template.find_resources("AWS::IAM::Policy")` and nothing else. CDK renders
+policies three ways; the guard checked one. `role.add_managed_policy(...)` (rendering to
+`Role.ManagedPolicyArns`) and `iam.Role(..., inline_policies={...})` (rendering to
+`Role.Policies`) both escaped it entirely.
+
+Demonstrated, not theorised: attaching **`AdministratorAccess` to both Lambda execution
+roles passed 130 of 130 tests** — administrator rights on the unauthenticated redirect
+function, with the posture suite green. The same wildcard added via `role.add_to_policy(...)`
+— the path the authors happened to use — correctly fired 6 tests.
+
+**The lesson, which generalises past this repo:** the guard worked for the shape the code was
+written in and was dead for two neighbouring shapes. Enumerating resource *types by name* is
+what created the hole, so the fix walks `to_json()` for `PolicyDocument` shapes structurally
+— covering a fourth rendering path by construction rather than by the next patch. Deliberate
+exclusions (`AssumeRolePolicyDocument`, and `KeyPolicy`, which trips CDK's legitimate default
+root statement of `kms:*` on `*`) are named in comments rather than left as omissions.
+
+**Two second-order lessons worth more than the fix:**
+
+1. **Mutation-testing one control proves that control, not the guard.** The lead had already
+   mutation-tested this suite by deleting `kms:Decrypt` and watching two tests fire — a real
+   check, but of a shape the guard *covers*. The question that found C-1 was not "does this
+   assertion fire?" but "what could I add that this would not see?" Only the second question
+   finds coverage holes.
+2. **An author cannot reliably audit their own guard.** devops-2 wrote both `app_stack.py`
+   and its posture suite; devops-1 objected at the time and was overruled for cost reasons,
+   with an independent audit promised as compensation. The audit found exactly the predicted
+   class of defect. The suite was otherwise sound — it derived from the rules rather than
+   rationalising its author's code — which is the point: the failure was not bias but
+   blindness, and blindness is not fixable by trying harder.
+
+**Consequence:** any test whose job is to *prevent* a class of defect must itself be shown to
+fail against that class, including against variants the current code does not use. A fix to a
+guard that is not itself mutation-tested repeats the original error one level up.

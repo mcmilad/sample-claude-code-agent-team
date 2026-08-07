@@ -7,7 +7,6 @@ generate_code.
 """
 
 import inspect
-import re
 
 from shorty.codec import ALPHABET, CODE_LENGTH, CODE_PATTERN, generate_code
 
@@ -76,7 +75,17 @@ def test_code_pattern_rejects_trailing_newline():
     # is the test that proves CODE_PATTERN is anchored with \A/\Z (or
     # equivalent fullmatch semantics) instead.
     assert CODE_PATTERN.fullmatch("abcdefg\n") is None
-    assert re.match(r"\A[A-Za-z0-9]{7}\Z", "abcdefg\n") is None
+
+    # `fullmatch` alone is NOT discriminating here: "abcdefg\n" is 8
+    # characters, so fullmatch rejects it under EITHER anchoring (the
+    # length alone fails the {7} quantifier against the whole string) --
+    # swapping CODE_PATTERN's \A...\Z for ^...$ would leave the assertion
+    # above green. `.match` is the call that actually distinguishes them:
+    # under ^...$ it matches (because trailing-newline-tolerant `$` lets
+    # the match succeed at the first 7 characters), under \A...\Z it does
+    # not, because \Z has no such exception. This assertion is what would
+    # catch a regression back to ^...$ -- see AGENT-90.
+    assert CODE_PATTERN.match("abcdefg\n") is None
 
 
 def test_code_pattern_rejects_leading_newline():

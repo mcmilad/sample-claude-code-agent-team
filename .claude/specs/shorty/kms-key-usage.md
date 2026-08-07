@@ -41,7 +41,7 @@ of inactivity for that caller. Two consequences:
    not to request volume.
 2. The `Decrypt` call is made **in the calling principal's authorization context**. This is
    the mechanism behind the grant requirements in §3 — and behind Finding C-1 in
-   `sa-review.md`.
+   `sa-review.md`, now resolved via `decisions.md` → D-006.
 
 **Data classification.** The table is tagged `data-classification: internal`. Stored data is
 a caller-supplied URL plus the minting user's Cognito `sub`. No credential, no secret, and
@@ -49,11 +49,13 @@ no direct identifier is stored.
 
 ## 3. Grants required by each principal
 
-> **This section corrects `design.md` → Security Considerations → Compute (tier 2).**
-> The design specifies `kms:GenerateDataKey` for `create_fn` and `kms:Decrypt` for
-> `redirect_fn`. Both are **below the documented minimum** and `create_fn`'s is
-> functionally broken. Raised as **Finding C-1 (Critical)** in `sa-review.md` and reported
-> to the lead; `design.md` is out of this issue's `Files:` scope and is not edited here.
+> **RESOLVED — this section documents what shipped.** An earlier draft of `design.md` gave
+> `create_fn` only `kms:GenerateDataKey` and `redirect_fn` only `kms:Decrypt`, calling that
+> "the minimum for CMK-encrypted table access". It was neither the minimum nor functional:
+> `create_fn` would have failed every `PutItem`. Raised as **Finding C-1 (Critical)** in
+> `sa-review.md`, corrected before any app-stack code was written, and recorded as
+> **`decisions.md` → D-006**. The policy below is the **shipped** configuration, read back
+> from the synthesized template — not a proposal.
 
 AWS documents the minimum permissions a principal needs on a customer-managed key in order
 to access a CMK-encrypted DynamoDB table
@@ -70,7 +72,7 @@ kms:DescribeKey
 kms:CreateGrant
 ```
 
-### 3.1 Recommended grant — applies identically to both execution roles
+### 3.1 The shipped grant — identical on both execution roles
 
 Scoped to the one key ARN and constrained so the key is usable **only** when the request
 reaches KMS via DynamoDB. The `kms:ViaService` condition is what keeps this from being a
@@ -89,10 +91,44 @@ action list: neither can use the key for anything except reaching the `links` ta
   ],
   "Resource": "arn:aws:kms:<region>:<account-id>:key/<key-id>",
   "Condition": {
-    "StringEquals": { "kms:ViaService": "dynamodb.<region>.amazonaws.com" }
+    "StringLike": { "kms:ViaService": "dynamodb.*.amazonaws.com" }
   }
 }
 ```
+
+> **Why the Region position is a literal `*`, and why not to "tighten" it.** The wildcard
+> keeps the grant Region-independent, which is the form AWS documents for a customer-managed
+> key protecting a DynamoDB table — its own worked key-policy example in
+> [DynamoDB encryption at rest usage notes](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/encryption.usagenotes.html)
+> → "Key policy for a customer managed key" uses exactly `StringLike` with
+> `dynamodb.*.amazonaws.com`. DynamoDB-initiated calls need not originate from the key's own
+> Region (cross-Region restore and export today; global-table replication if the table is
+> ever converted), and a Region-pinned grant does not authorize those.
+>
+> **The trap — operator semantics, nothing subtler.** Only the `Like` family of condition
+> operators performs wildcard expansion; the exact-match operator treats `*` as a literal
+> asterisk. So swapping the operator while keeping this value yields a condition that matches
+> **no** real `kms:ViaService` value, silently denying both roles all KMS access and taking
+> down both routes. `decisions.md` → D-006 calls this out as "a second, subtler way to break
+> this".
+>
+> Two guards make that mistake self-announcing rather than something you discover in
+> production:
+> - `tests/infra/test_security_posture.py` asserts the shipped form, so a change in either
+>   direction fails the build before it reaches a deploy.
+> - IAM Access Analyzer's policy validation raises
+>   **`WILDCARD_WITHOUT_LIKE_OPERATOR`** (a `GENERAL_WARNING`) on exactly this pattern:
+>   *"Your condition value includes a `*` or `?` character. If you meant to use a wildcard
+>   (`*`, `?`), update the condition operator to include `Like`."*
+>   ([IAM policy validation check reference](https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-reference-policy-checks.html))
+>   Worth wiring into any future policy linting — it turns this paragraph into an automated
+>   check.
+>
+> *(Aside, to prevent a different wrong inference: `kms:ViaService` is a **single-valued
+> context key** — that describes the value AWS supplies at evaluation time, not what your
+> policy may contain. A policy may still supply a **list** of endpoints to match against, and
+> AWS's own examples do. The trap above follows from operator semantics alone and does not
+> depend on this.)*
 
 `kms:CreateGrant` is required by the principal that **creates or re-keys the table** — the
 CloudFormation deployment role, not the Lambda execution roles. DynamoDB uses those grants
@@ -105,11 +141,13 @@ Least privilege is preserved where it actually pays: the **DynamoDB** action sta
 ARN, per NF4). The redirect function still cannot write a link. What changes is only the
 KMS action list, which the service requires as a set.
 
-**Implementation note.** CDK's `table.grant_write_data(role)` / `table.grant_read_data(role)`
-wire the corresponding KMS grants automatically when the table has a customer-managed key.
-If the implementer prefers hand-written policies (as `design.md` implies), the statement
-above is the target. Either way, `tests/infra/test_security_posture.py` should assert the
-KMS action set and the `kms:ViaService` condition, not just the DynamoDB action.
+**Verified against the synthesized template.** `cdk synth` was run and both role policies
+read back directly from `cdk.out/*.template.json`. `CreateFnRoleDefaultPolicy` and
+`RedirectFnRoleDefaultPolicy` each carry exactly
+`kms:Decrypt, kms:DescribeKey, kms:Encrypt, kms:GenerateDataKey*, kms:ReEncrypt*` under
+`{"StringLike": {"kms:ViaService": "dynamodb.*.amazonaws.com"}}`, and neither carries
+`kms:CreateGrant`. This document is written from that template, not from the design prose it
+supersedes.
 
 ### 3.2 Encryption context
 
@@ -136,10 +174,14 @@ tightening if the account ever hosts a second table under the same key.
 
 ## 5. Cost
 
-> **This section corrects `spec.md` NF6 and `design.md` → Trade-offs #2**, both of which
-> state the key costs "~$1/month". That is the year-one figure only; it is not the steady
-> state for a key with rotation enabled. Raised as **Finding W-4 (Warning)** in
-> `sa-review.md`.
+> **RESOLVED.** `spec.md` NF6 and `design.md` → Trade-offs #2 originally stated the key
+> costs "~$1/month". That is the year-one figure only, not the steady state for a key with
+> rotation enabled. Raised as **Finding W-4 (Warning)** in `sa-review.md` and **since
+> corrected** — NF6, Trade-offs #2 and `apps/shorty/README.md` all now state $3/month steady
+> state, verified independently by the lead and by review-1.
+>
+> Retained as a record of why the figure is what it is. **Do not "correct" $3/month back
+> toward $1/month** — that is the error this section exists to prevent.
 
 Per [AWS KMS pricing](https://aws.amazon.com/kms/pricing/):
 
@@ -202,18 +244,20 @@ and restoring it requires re-enabling that same key. This is why step 2 precedes
 
 | Item | Disposition |
 |---|---|
-| Lambda execution-role KMS grants are below the documented minimum | **Finding C-1 (Critical)** — `create_fn` cannot write. Must be fixed before the owner deploys |
-| Key policy is not specified in `design.md` | **Finding S-4** — recommend an explicit `kms:ViaService`-constrained policy plus an alias |
-| No key alias | Operationally awkward; a raw key ID in the runbook is easy to mistype. Recommend `alias/shorty-links` |
-| No CloudWatch alarm on key-disabled / table `Inaccessible` | **Finding S-1** — seven days is the entire window to react |
+| Lambda execution-role KMS grants below the documented minimum | **RESOLVED** — Finding C-1, corrected per `decisions.md` → D-006 and verified against the synthesized template (§3.1). Both roles now carry the full action set under the Region-independent `ViaService` condition |
+| No explicit key policy; CDK's account-root default is in force | **Finding S-4 — deferred.** The default (root administers, IAM policies govern use) is safe; the identity-side grant in §3.1 is what actually constrains access. **Trigger:** any second principal or cross-account consumer of this key |
+| No key alias | **Finding S-4 — deferred.** Operationally awkward — the runbook asks the owner to handle a raw key ID. **Trigger:** first real deploy; `alias/shorty-links` is a one-line addition |
+| No CloudWatch alarm on key-disabled / table `Inaccessible` | **Finding S-1 — deferred.** The highest-value alarm in the workload: seven days is the *entire* window before the table is archived and unrecoverable. **Trigger:** the owner's first deploy — this one should not wait for real traffic |
 | Encryption context unused as a policy condition | Acceptable — single table, single key |
-| Key is single-Region | Acceptable — multi-Region is out of scope |
+| Key is single-Region | Acceptable — multi-Region is out of scope. Note this does **not** make the `ViaService` wildcard unnecessary; see §3.1 |
 
 ---
 
 **Flagged for security review.** This document records BYOK (customer-managed KMS key) usage
 for the Shorty workload, per `.claude/rules/AWS-security-guidelines.md` → Amazon S3/DynamoDB
-BYOK requirements and Data Security Implementation Order Phase 3 item 8. It contains one
-**Critical** finding (C-1, §3) that is a prerequisite for a working deployment, and one
-corrected cost figure (§5). Reviewer attention is specifically requested on §3 (grant set)
-and §5 (steady-state cost). Full assessment: `.claude/specs/shorty/sa-review.md`.
+BYOK requirements and Data Security Implementation Order Phase 3 item 8. **No open Critical
+remains:** C-1 was corrected before implementation and is recorded as D-006; §3.1 documents
+the shipped grant, read back from the synthesized template. Reviewer attention is requested
+on §3.1 (the `ViaService` form and why it must not be narrowed), §5 (steady-state cost —
+$3/month, not $1), and the deferred items in §7. Full assessment:
+`.claude/specs/shorty/sa-review.md`.

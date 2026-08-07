@@ -212,7 +212,7 @@ decrypt it:
 #    be deleted at all.
 aws dynamodb update-table \
   --table-name "$TABLE_NAME" \
-  --no-deletion-protection \
+  --no-deletion-protection-enabled \
   --region "$AWS_REGION" --no-cli-pager
 
 # 3. Delete the table while the key is still enabled and accessible.

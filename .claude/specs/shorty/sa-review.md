@@ -37,7 +37,13 @@ the application non-functional on first deploy**, and it is silent on several co
 guidelines require. The Critical is invisible to every gate in the build: `cdk synth` passes,
 the handler unit tests stub `boto3`, and D-001 guarantees nobody deploys before handoff.
 
-**Counts: 1 Critical · 5 Warnings · 7 Suggestions.**
+**Counts as first issued: 1 Critical · 5 Warnings · 7 Suggestions.**
+
+**Status at cycle-1 close: 0 open Critical, 0 open Warnings.** All 5 Warnings are closed —
+W-1, W-3 implemented; W-4 corrected across all three documents; W-2 and W-5 accepted as D-007
+and D-008. C-1 was corrected before implementation (D-006, verified against the synthesized
+template). Of the 7 Suggestions, S-2 and S-6 are done and the remaining 5 are deferred with
+stated triggers. Full accounting — all 13 findings — in **Dispositions** below.
 
 ---
 
@@ -160,8 +166,23 @@ not omission.
 
 ### Security
 
-**C-1 · [Critical] The Lambda execution roles' KMS grants are below the documented minimum;
-`create_fn` cannot write to the table at all.**
+**C-1 · [Critical — RESOLVED] The Lambda execution roles' KMS grants are below the documented
+minimum; `create_fn` cannot write to the table at all.**
+
+> **RESOLVED via `decisions.md` → D-006**, before any app-stack code was written. Both roles
+> now carry `kms:Encrypt`, `kms:Decrypt`, `kms:ReEncrypt*`, `kms:GenerateDataKey*`,
+> `kms:DescribeKey` on the single key ARN under
+> `{"StringLike": {"kms:ViaService": "dynamodb.*.amazonaws.com"}}`; neither carries
+> `kms:CreateGrant`. The DynamoDB action split (`PutItem` / `GetItem`) is untouched.
+> **Verified against the synthesized template** — `cdk synth` run and both
+> `*RoleDefaultPolicy` resources read back from `cdk.out/*.template.json` — not against the
+> design prose. `tests/infra/test_security_posture.py` asserts the corrected set.
+>
+> One correction to the fix I originally proposed: my suggested policy pinned the Region in
+> `kms:ViaService`. The shipped form wildcards it, which is what AWS's own customer-managed-key
+> example for DynamoDB uses and what keeps the grant valid for DynamoDB-initiated calls that
+> do not originate from the key's Region. See `kms-key-usage.md` §3.1 for why narrowing it
+> breaks the deployment. The finding below is retained as the original analysis.
 
 `design.md` → Security Considerations → Compute specifies: *"Each role also gets
 `kms:GenerateDataKey` (create) / `kms:Decrypt` (redirect) on the one key ARN — the minimum for
@@ -445,18 +466,83 @@ Highest impact, lowest effort first.
 
 | # | Action | Finding | Impact | Effort |
 |---|---|---|---|---|
-| 1 | Fix the KMS grants on both execution roles; add `ViaService`; assert both in the posture test | **C-1** | Application does not work without it | Low — one policy statement per role |
-| 2 | Correct the KMS cost figure to $1 → $3/month in NF6, trade-off #2, and the runbook | **W-4** | Owner is left paying 3x the documented amount, indefinitely | Trivial |
-| 3 | Add explicit `logs.LogGroup`s for both functions with retention + `DESTROY` | **W-1** | Unbounded cost, no data-protection policy, incomplete teardown | Low |
-| 4 | Add the `cost-center` tag at `App` level | **W-3** | Guidelines-required; one line | Trivial |
-| 5 | Decide DynamoDB CloudTrail data events — enable, or record a D-006 accepting the gap | **W-2** | No data-tier audit trail | Low either way |
-| 6 | Record open-redirect abuse as a decision; note the per-`createdBy` quota as the pre-exposure control | **W-5** | Closes the one uncovered abuse surface | Low |
-| 7 | Add the six alarms, `deletion_protection`, route-level throttling, key alias + policy, log-retention bump, Lambda-permission assertion, D-002 completeness line | S-1…S-7 | Hardening and completeness | Low each |
+| 1 | ~~Fix the KMS grants on both execution roles; add `ViaService`; assert both in the posture test~~ — **DONE** (D-006, template-verified) | **C-1** | Application does not work without it | Low — one policy statement per role |
+| 2 | ~~Correct the KMS cost figure to $1 → $3/month in NF6, trade-off #2, and the runbook~~ — **DONE** (verified in all three) | **W-4** | Owner is left paying 3x the documented amount, indefinitely | Trivial |
+| 3 | ~~Add explicit `logs.LogGroup`s for both functions with retention + `DESTROY`~~ — **DONE** | **W-1** | Unbounded cost, no data-protection policy, incomplete teardown | Low |
+| 4 | ~~Add the `cost-center` tag at `App` level~~ — **DONE** (`app.py`, asserted in posture suite) | **W-3** | Guidelines-required; one line | Trivial |
+| 5 | ~~Decide DynamoDB CloudTrail data events — enable, or record a decision accepting the gap~~ — **DONE** (accepted, **D-007**) | **W-2** | No data-tier audit trail | Low either way |
+| 6 | ~~Record open-redirect abuse as a decision~~ — **DONE** (accepted, **D-008**) | **W-5** | Closes the one uncovered abuse surface | Low |
+| 7 | S-2 and S-6 **done**; S-1, S-3, S-4, S-5, S-7 deferred with triggers — see **Dispositions** | S-1…S-7 | Hardening and completeness | Low each |
+
+> **This table is the original cycle-1 plan, struck as items landed.** The live status of
+> every finding is the **Dispositions** section above — if the two ever disagree, Dispositions
+> wins. Row 2 in particular must not be re-actioned: the $3/month figure is the correct one,
+> and "correcting" it back toward ~$1/month would reintroduce the error W-4 exists to refute.
 
 **Sequencing note.** Items 1 and 3 change `ShortyDataStack` / `ShortyAppStack` and their
 posture tests, so they should land before the group's review cycle rather than after. Items 2,
 5, and 6 are edits to `spec.md` / `design.md` / `decisions.md`, which are outside this issue's
 `Files:` — they are proposed to the lead, not made here.
+
+## Dispositions
+
+Recorded at cycle-1 close (AGENT-91). Verified against the shipped tree, not assumed. The
+governing context is D-001: **this PoC is authored deploy-ready but never deployed by the
+team**, so "deferred with a stated trigger" is the honest disposition for controls whose value
+only exists once something is running. Nothing is silently dropped.
+
+**Resolved / implemented — all 13 findings are accounted for here or under "Deferred" below.**
+
+| Finding | Disposition |
+|---|---|
+| **C-1** (KMS grant split) | **Resolved** — D-006; verified against the synthesized template |
+| **W-1** (Lambda log groups) | **Accepted and implemented** — explicit `logs.LogGroup` per function, `ONE_MONTH` retention, passed via `log_group=` |
+| **W-2** (CloudTrail data events) | **Accepted as a documented deviation** — D-007 |
+| **W-3** (`cost-center` tag) | **Accepted and implemented** — `cdk.Tags.of(app).add("cost-center", "shorty-poc")` in `app.py`, and asserted in `tests/infra/test_security_posture.py`, so the full five-tag set is now a build-breaking guarantee rather than a convention |
+| **W-4** (KMS cost understated 3x) | **Accepted and corrected** — `$3/month steady state` now stated in `spec.md` NF6, `design.md` trade-off #2, and `apps/shorty/README.md`. **This figure is final; do not "correct" it back toward ~$1/month** — that is the error the finding exists to refute. `kms-key-usage.md` §5 carries the derivation and citation |
+| **W-5** (open-redirect / phishing abuse) | **Accepted as a documented deviation** — **D-008**. The mitigation recorded is stronger than the per-`createdBy` quota I proposed: minting requires a Cognito JWT and `self_sign_up_enabled=False`, so an anonymous attacker cannot mint at all and every link is attributable to an administratively-created identity. Revisit trigger is signup being opened up |
+| **S-2** (DynamoDB deletion protection) | **Accepted and implemented** — `deletion_protection=True` in `data_stack.py` |
+| **S-6** (D-002 completeness) | **Accepted and applied by the lead** — D-002 now carries the full REST-vs-HTTP ledger, including resource policies and request validators as explicit **No** rows |
+
+**Deferred, with triggers:**
+
+- **S-1 · Alarms — deferred; the one I would un-defer first.** No CloudWatch alarm exists
+  anywhere in the tree (confirmed: no `Alarm` in `shorty_infra/` or `tests/`). Alarms measure a
+  running system, and under D-001 nothing runs, so they buy nothing during the build. **What
+  makes them necessary:** the owner's first `cdk deploy` — not "real traffic". The
+  key-disabled / table-`Inaccessible` alarm specifically should not wait, because that failure
+  has a hard **seven-day** window: if KMS access is not restored within it the table is
+  archived and can no longer be accessed, and DynamoDB's only notification is an email nobody
+  may be watching. An alarm on it is the difference between a recoverable mistake and permanent
+  data loss. The rest (API Gateway `5xx`, Lambda `Errors` and `Throttles` — the latter matters
+  because reserved concurrency is set and will produce 429s — DynamoDB `SystemErrors`, and the
+  503 `CODE_COLLISION` path) become necessary the moment the service serves anyone but the
+  owner.
+- **S-3 · Route-level throttling — deferred.** Confirmed still stage-only: a single
+  `ThrottleSettings(rate_limit=50, burst_limit=100)`. At those numbers a shared bucket is not a
+  realistic starvation risk for two routes with one user. **Trigger:** any public exposure of
+  `GET /{code}`, at which point the unauthenticated route needs its own ceiling so a flood on
+  it cannot consume the mint route's budget — this is also what would strengthen D-002's
+  compensating-controls argument.
+- **S-4 · Key policy and alias — deferred.** Confirmed neither shipped. CDK's default key
+  policy (root administers, IAM governs use) is safe, and the identity-side grant in
+  `kms-key-usage.md` §3.1 is what actually constrains access, so the explicit policy is
+  belt-and-braces here. **Trigger for the policy:** a second principal or any cross-account
+  consumer. **Trigger for the alias:** first deploy — the runbook currently hands the owner a
+  raw key ID to retype, and `alias/shorty-links` is one line.
+- **S-5 · Access-log retention — deferred.** Confirmed still `ONE_MONTH`. D-007 accepted no
+  DynamoDB data events, which makes the access log the *sole* record of redirect traffic and
+  argues for longer — but retaining logs for a system that never serves a request is spend
+  without a reader. **Trigger:** first deploy that serves non-owner traffic; three months is
+  the number, and it should be revisited together with D-007 rather than separately.
+- **S-7 · Lambda resource-policy assertion — deferred.** Confirmed absent: no
+  `AWS::Lambda::Permission` or `SourceArn` assertion anywhere in `tests/`. CDK's HTTP API
+  integration emits a correctly scoped permission by default, so this is a *regression* guard,
+  not a live gap — and D-011 is the precedent for why that distinction is thin (a guard that
+  checks one shape is dead for its neighbours). **Trigger:** bundle it with the next change to
+  the posture suite; it is a few lines and the suite is already the right home for it.
+
+**Rejected:** none. Every suggestion above remains valid; none was found wrong on re-check.
 
 ## Cost Impact
 
