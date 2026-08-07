@@ -125,9 +125,17 @@ export function validateTargetUrl(input: unknown): ValidationResult;
 ```
 
 **Cross-stack outputs** — `DataStack` exports `table: ITable` and `key: IKey`;
-`ApiStack` consumes both and exports `apiUrl: string`; `WebStack` consumes `apiUrl` plus
-the identity pool id for the SPA's build-time config. Stacks are wired in `bin/app.ts`,
+`ApiStack` consumes both and exports `apiUrl: string` and `identityPoolId: string`;
+`WebStack` consumes `{ apiUrl, identityPoolId, key }`. Stacks are wired in `bin/app.ts`,
 which Sprint 1 owns exclusively.
+
+> **Amended during build (2026-08-07).** `WebStack` originally took only
+> `{ apiUrl, identityPoolId }`. That contract could not satisfy its own acceptance
+> criterion — the SPA bucket must use the customer-managed key *from DataStack*, so the
+> key has to reach WebStack. Adding `readonly key: IKey` was the minimal fix; the
+> alternative, letting WebStack mint its own CMK, means a second key to rotate, document,
+> and audit for no benefit. Recorded here rather than left as a silent divergence between
+> the docs and the code.
 
 ## Edge Cases & Risks
 
@@ -139,13 +147,39 @@ which Sprint 1 owns exclusively.
   `Location` header.
 - **Open-redirect / SSRF laundering (the real risk here).** An unrestricted shortener
   masks phishing targets and can be used to reach link-following internal services.
-  Mitigation: scheme allowlist (`http`, `https` only — rejecting `javascript:`, `data:`,
-  `file:`), rejection of embedded credentials, and rejection of `localhost`, RFC1918
-  ranges, and `169.254.169.254`. This mitigates but does not eliminate: DNS names
-  resolving to private space at follow time are not caught, and that residual risk is
-  accepted for a non-deployed PoC.
+  Mitigation: scheme allowlist (`http`, `https` only), rejection of embedded credentials,
+  and rejection of every non-publicly-routable host. This mitigates but does not
+  eliminate: DNS names resolving to private space at follow time are not caught, and that
+  residual risk is accepted for a non-deployed PoC.
+
+  **The rejection corpus, in full.** The first version of this spec named only
+  `localhost`, RFC1918, and `169.254.169.254`, and an implementation matching it exactly
+  still allowed `http://[::ffff:169.254.169.254]/` through to the metadata endpoint. An
+  under-specified corpus is indistinguishable from an unguarded one, so it is enumerated
+  here rather than summarised:
+
+  | Class | Must reject | Note |
+  |---|---|---|
+  | Scheme | anything but `http`/`https` | Must be tested with a **non-empty hostname** (`javascript://example.com/%0aalert(1)`), or the test passes via the empty-host branch and the allowlist is never exercised |
+  | Credentials | `user:pass@host` | |
+  | Length | > 2048 chars | |
+  | IPv4 loopback | `127.0.0.0/8` | Incl. `0x7f000001`, `2130706433` — canonicalised by the URL parser |
+  | IPv4 unspecified | `0.0.0.0/8` | |
+  | IPv4 private | `10/8`, `172.16/12`, `192.168/16` | |
+  | IPv4 link-local | `169.254.0.0/16`, incl. `169.254.169.254` | |
+  | IPv6 loopback | `::1` | |
+  | IPv6 unspecified | `::`, `::0` | Both normalise to `[::]` |
+  | IPv6 ULA | `fc00::/7` (incl. `fd00::/8`) | |
+  | IPv6 link-local | `fe80::/10` | |
+  | **IPv4 embedded in IPv6** | every range above, under **all three** prefixes: `::ffff:` (IPv4-mapped), `::` (IPv4-compatible), `64:ff9b::` (NAT64) | The dangerous class. The URL parser renders all of them as hex groups — `[::ffff:169.254.169.254]` → `[::ffff:a9fe:a9fe]`, `[::127.0.0.1]` → `[::7f00:1]`, `[64:ff9b::127.0.0.1]` → `[64:ff9b::7f00:1]` — and the fully-expanded and uppercase spellings normalise to the same values. **String-matching a prefix is not a fix.** Extract the low 32 bits and feed the octets through the existing IPv4 rules |
+  | **Must still ACCEPT** | public IPv6, e.g. `[2606:4700::1]` | Pin these in the accept corpus. The fix must not over-block into rejecting all IPv6 — that would be a correctness regression dressed as a security improvement |
 - Stored URL is echoed into a `Location` header → header-injection risk if it contained
-  CR/LF. `new URL()` parsing in validation rejects those before storage.
+  CR/LF. `new URL()` **strips** tab, CR, and LF during parsing rather than rejecting —
+  `http://example.com/a\r\nX-Injected: 1` parses to `http://example.com/aX-Injected:%201`.
+  The outcome holds (no CR/LF survives into a stored URL, so none can reach a `Location`
+  header), but note the mechanism: the input is silently *mutated*, not refused, and the
+  altered URL is what gets stored. Do not read this as a validation failure a caller can
+  observe, and do not remove a downstream check on the belief that parsing rejected it.
 - **Risk: the security posture drifts from the spec.** Prose in a design doc does not fail
   a build. Mitigation is A4 — assertions against the synthesized CloudFormation template.
 
@@ -156,7 +190,7 @@ which Sprint 1 owns exclusively.
 | A1 | Handlers meet the contract above, including every rejection case | `npm test` (jest, `test/handlers/`, `test/lib/`) |
 | A2 | The CDK app synthesizes with no AWS account or credentials | `npx cdk synth` |
 | A3 | Types are sound across infra, handlers, and SPA | `npm run typecheck` (`tsc --noEmit`, both packages) |
-| A4 | The synthesized template asserts the security posture: Block Public Access on both buckets, `aws:SecureTransport:false` deny statements, CMK encryption on table and buckets, PITR enabled, `AWS_IAM` authorizer on `POST /links`, two distinct execution roles, and no wildcard IAM actions | `npm test` (`test/infra/`) |
+| A4 | The synthesized template asserts the security posture: Block Public Access on both buckets, `aws:SecureTransport:false` deny statements, CMK encryption on the table and the SPA bucket, PITR enabled, OAC (not OAI) on the distribution, `redirect-to-https`, `AWS_IAM` authorizer on `POST /links`, two distinct execution roles, and no wildcard IAM actions | `npm test` (`test/infra/`) |
 | A5 | The SPA builds and its API client handles success and error branches | `npm run build --prefix web` and its unit test |
 | A6 | CI is restored, passes on the built tree, and contains no deploy job, no AWS credentials, and no `secrets:` reference | `grep -L secrets .github/workflows/serverless-3tier.yml` + a green run |
 
@@ -165,7 +199,12 @@ which Sprint 1 owns exclusively.
 Deliberately excluded; each is a real feature that a production shortener would need.
 
 - **Deployment of any kind**, and therefore also: custom domains, ACM certificates,
-  teardown procedures, and live smoke tests. (NF1.)
+  teardown procedures, and live smoke tests. (NF1.) One consequence is load-bearing and
+  is easy to miss: with no custom domain there is no ACM certificate, and without one
+  CloudFront pins the viewer TLS floor itself at TLS 1.0 on the default
+  `*.cloudfront.net` certificate. A TLS 1.2 minimum is therefore **not achievable in this
+  example** — see `design.md` → Encryption in transit. It is an accepted gap, not a
+  satisfied control.
 - Click analytics / counters, custom vanity aliases, link expiry (TTL), link deletion or
   editing, and per-user link ownership.
 - WAF web ACL on the distribution (Warning-level in the rules; see Design Decisions).

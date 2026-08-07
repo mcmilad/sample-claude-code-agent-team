@@ -92,8 +92,13 @@ examples/serverless-3tier/
 ### WebStack (`lib/web-stack.ts`)
 - **Responsibility:** the private SPA bucket, the access-log bucket, the CloudFront
   distribution with Origin Access Control, and the response-headers policy.
-- **Interface:** consumes `{ apiUrl, identityPoolId }` for the SPA's build-time config;
-  exposes `readonly distributionDomainName: string`, which ApiStack's CORS allowlist
+- **Interface:** consumes `{ apiUrl, identityPoolId, key }` — the first two for the SPA's
+  build-time config, `key` being DataStack's customer-managed KMS key, which the SPA and
+  log buckets encrypt with. (`key` was added during the build: the original
+  `{ apiUrl, identityPoolId }` contract could not satisfy the requirement that the SPA
+  bucket use the CMK *from DataStack*, and a WebStack-minted key would be a second CMK to
+  rotate and audit for nothing.) Exposes `readonly distributionDomainName: string`, which
+  ApiStack's CORS allowlist
   needs. That is a cycle if expressed as a CDK reference, so the CORS origin is a stack
   **parameter/context value**, not a cross-stack import — see Trade-offs.
 - **Dependencies:** ApiStack (one-way).
@@ -174,11 +179,24 @@ asserted by a test in `test/infra/` (A4), not merely written here.
   `GenerateDataKey` for create) on the one key ARN. No wildcard actions and no wildcard
   resources anywhere — asserted in `test/infra/api-stack.test.ts`.
 - **Encryption at rest.** Customer-managed KMS key with rotation enabled, used by the
-  DynamoDB table (`SSESpecification` → KMS, not the default AWS-owned key) and by both S3
-  buckets. Critical if absent.
+  DynamoDB table (`SSESpecification` → KMS, not the default AWS-owned key) and by the SPA
+  bucket. Critical if absent.
+  **The access-log bucket is SSE-S3, not the CMK, and must stay that way.** CloudFront
+  standard logging does not support an SSE-KMS destination bucket; pointing a distribution
+  at one silently produces no logs. "Upgrading" this bucket to the CMK therefore trades a
+  working audit trail for a cosmetically stronger encryption setting. This is a service
+  constraint, not an oversight.
 - **Encryption in transit.** Both buckets carry a bucket policy denying every action when
-  `aws:SecureTransport` is `false`. CloudFront sets `redirect-to-https` and a minimum
-  protocol of TLS 1.2. Critical if absent.
+  `aws:SecureTransport` is `false` (CDK `enforceSSL: true`). CloudFront sets
+  `redirect-to-https`, which is enforced and asserted. Critical if absent.
+  **Known limitation — the viewer-facing TLS floor is *not* 1.2.** `MinimumProtocolVersion`
+  is settable only on a distribution with a custom domain and an ACM certificate, both out
+  of scope because nothing is deployed. On the default `*.cloudfront.net` certificate
+  CloudFront pins the security policy itself, admitting TLS 1.0/1.1 — weaker than this
+  design originally claimed. The CDK prop is a no-op without a certificate and does not
+  reach the template, so setting it would be dead config that reads as protection. Stated
+  here as an accepted gap rather than asserted as a control; closing it requires a custom
+  domain, and therefore a deploy.
 - **Secrets management.** There are none. No credentials, tokens, or keys exist in this
   design — the identity pool issues short-lived credentials at runtime and CI holds no AWS
   secrets (NF1). Nothing is inlined because there is nothing to inline.
@@ -202,8 +220,12 @@ asserted by a test in `test/infra/` (A4), not merely written here.
   private-address rejection in `validate.ts`, plus the `AWS_IAM` authorizer raising the
   cost of bulk minting. Residual, accepted for a non-deployed PoC: a public DNS name that
   resolves into private space at follow time is not caught by pre-storage validation.
-  Secondary: header injection via CR/LF in a stored URL, eliminated because `new URL()`
-  rejects those at validation time.
+  Secondary: header injection via CR/LF in a stored URL. Eliminated, but by *stripping*,
+  not rejection — the WHATWG parser removes tab/CR/LF during parsing, so
+  `http://example.com/a\r\nX-Injected: 1` becomes `http://example.com/aX-Injected:%201`
+  and is stored in that altered form. The control is real; the mechanism is silent
+  mutation rather than a refusal, which is worth knowing before anyone treats a
+  downstream check as redundant. See `spec.md` → Edge Cases.
 
 ## Trade-offs & Alternatives
 
