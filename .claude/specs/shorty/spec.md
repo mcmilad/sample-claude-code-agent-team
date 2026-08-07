@@ -62,8 +62,11 @@ Backend-only: there is no UI, no SPA, no hosted login page. The deliverable is a
 - **NF5** Readable end to end in one sitting. One language (Python) across infra, handlers,
   and tests. No Powertools, no web framework on the handlers, no ORM.
 - **NF6** Cost while the team works: zero, enforced by NF1. Cost once the owner deploys:
-  dominated by the customer-managed KMS key (~$1/month); everything else is on-demand and
-  effectively free at POC traffic.
+  dominated by the customer-managed KMS key at **$3/month steady state** ($1 for the key,
+  plus $1 for each of the first two annual rotations, capped after the second — so $1 on day
+  one rising to $3 by year three); everything else is on-demand and effectively free at PoC
+  traffic. Because the key is `RETAIN`, this charge survives `cdk destroy` — the runbook must
+  say so.
 
 ## Constraints & Assumptions
 

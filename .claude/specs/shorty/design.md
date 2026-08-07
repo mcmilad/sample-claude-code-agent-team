@@ -40,14 +40,16 @@ Two stacks, split on **lifecycle** rather than on tier:
 
 **`ShortyDataStack`** — the stateful half.
 - `kms.Key` — customer-managed, `enableKeyRotation=True`, `RemovalPolicy.RETAIN`
-- `dynamodb.TableV2` `links` — PK `code` (String), on-demand billing,
-  `encryption=CUSTOMER_MANAGED` with the key above, `pointInTimeRecovery=True`,
+- `dynamodb.Table` (the v1, single-region L2 — **not** `TableV2`; see `decisions.md` D-009)
+  `links` — PK `code` (String), on-demand billing, `encryption=CUSTOMER_MANAGED` with the
+  key above, point-in-time recovery enabled, deletion protection enabled,
   `RemovalPolicy.RETAIN`, tagged `data-classification=internal`
 - Exposes `table` and `key` as attributes on the stack object.
 
-**`ShortyAppStack`** — the disposable half. Takes `table` and `key` as **constructor
-props** (typed Python parameters), not `Fn::ImportValue` string lookups, so a rename cannot
-silently produce a dangling reference.
+**`ShortyAppStack`** — the disposable half. Takes `table: dynamodb.ITable` and `key` as
+**constructor props** (typed Python parameters), not `Fn::ImportValue` string lookups, so a
+rename cannot silently produce a dangling reference. The prop is `ITable`, not `ITableV2`,
+as a direct consequence of D-009.
 - `cognito.UserPool` + `UserPoolClient` (`ADMIN_USER_PASSWORD_AUTH` enabled, no hosted UI)
 - `lambda_.Function` ×2, Python 3.13, one `iam.Role` each, reserved concurrency set
 - `apigatewayv2.HttpApi` + `HttpJwtAuthorizer` on `POST /links` only
@@ -166,8 +168,16 @@ being caught in review.
 - One execution role per function, never shared. `create_fn` gets `dynamodb:PutItem`;
   `redirect_fn` gets `dynamodb:GetItem`. Each is scoped to the single table ARN. No
   wildcard actions, no `dynamodb:*`, no `Resource: "*"`.
-- Each role also gets `kms:GenerateDataKey` (create) / `kms:Decrypt` (redirect) on the one
-  key ARN — the minimum for CMK-encrypted table access.
+- Each role also gets the **full AWS-documented CMK action set** on the one key ARN —
+  `kms:Encrypt`, `kms:Decrypt`, `kms:ReEncrypt*`, `kms:GenerateDataKey*`, `kms:DescribeKey`
+  — constrained by `kms:ViaService = dynamodb.*.amazonaws.com` so neither role can use the
+  key except through DynamoDB. **Both roles get the same KMS set, including the reader.**
+  Splitting it by read/write is the natural-looking mistake and it breaks the writer: see
+  `decisions.md` → D-006. `kms:CreateGrant` belongs to the deploying principal, not to
+  either Lambda role.
+- The `ViaService` Region position is a literal `*`, not the deployment Region. AWS requires
+  the permission to be Region-independent so DynamoDB can make cross-Region calls; pinning
+  the Region is the other natural-looking mistake here.
 - Reserved concurrency set on both functions, so a flood on one route cannot exhaust the
   account's concurrency and starve the other.
 - No KMS on environment variables: the only variable is `TABLE_NAME`, which is not
@@ -223,9 +233,12 @@ not have.
 1. **HTTP API over REST API** costs WAF. Accepted: throttling plus a read-only redirect
    role covers the realistic POC threat, and REST API would raise cost and verbosity for
    every route to protect one.
-2. **CMK over an AWS-owned key** costs ~$1/month once deployed and buys explicit key
-   policy, rotation, and an auditable grant list. The guidelines require it for anything
-   above `public`.
+2. **CMK over an AWS-owned key** costs **$3/month at steady state** once deployed, and buys
+   explicit key policy, rotation, and an auditable grant list. The guidelines require it for
+   anything above `public`. The figure is $1/month for the key plus $1/month for each of the
+   first two rotations, capped after the second — so it is $1 on day one, $2 after the first
+   annual rotation, and $3 thereafter. Quoting the day-one number as if it were the
+   steady-state number understates the only recurring charge this PoC has.
 3. **`RETAIN` on the data stack** means `cdk destroy` leaves the table and key behind — a
    deliberate footgun-avoidance that the runbook must call out, or the owner will be
    surprised by a lingering KMS charge.

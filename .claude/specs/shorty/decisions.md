@@ -104,3 +104,140 @@ already visible in the synthesized template and the console.
 Recorded so the absence reads as a decision rather than an oversight during review. If any
 function ever carries a secret, the correct fix is Secrets Manager at runtime, not an
 encrypted environment variable.
+
+---
+
+## D-006 — Both Lambda roles get the same full KMS action set, not a read/write split
+
+**Date:** 2026-08-08 · **By:** sa-1 (finding C-1), confirmed by the lead against AWS docs ·
+**Status:** Accepted — corrects an earlier error in `design.md`
+
+**The original design was wrong.** It gave `create_fn` only `kms:GenerateDataKey` and
+`redirect_fn` only `kms:Decrypt`, describing that as "the minimum for CMK-encrypted table
+access". It is not the minimum; it is a broken configuration.
+
+AWS documents the minimum permissions on a customer-managed key for DynamoDB as
+`kms:Encrypt`, `kms:Decrypt`, `kms:ReEncrypt*`, `kms:GenerateDataKey*`, `kms:DescribeKey`,
+and `kms:CreateGrant`. The mechanism that makes the split fail is **table-key caching**:
+DynamoDB caches the plaintext table key per calling principal and re-requests it with a
+`Decrypt` call after roughly five minutes of inactivity. Every caller therefore needs
+`Decrypt` — the writer included. `GenerateDataKey` is consumed when the table key is first
+created, by DynamoDB under a grant, not on each `PutItem`.
+
+**Impact had it shipped:** `create_fn` would fail every `PutItem` after each cold start or
+idle gap — a 100% failure rate on `POST /links`, not an intermittent one.
+
+**Why no gate would have caught it.** This is the part worth remembering. `cdk synth`
+validates structure, not authorization. The handler tests stub `boto3` per the interface
+contract, so no real KMS call is ever made. The infra tests would have asserted the policy
+the design specified — asserting the bug and passing. And under D-001 the first real
+invocation happens on the owner's machine, after the team is gone. A design-stage review was
+the only thing positioned to catch it, which is why AGENT-76 ran in group 1 rather than
+alongside the code.
+
+**Correction:** both roles get `kms:Encrypt`, `kms:Decrypt`, `kms:ReEncrypt*`,
+`kms:GenerateDataKey*`, `kms:DescribeKey` on the single key ARN, constrained by
+`kms:ViaService = dynamodb.*.amazonaws.com`. `kms:CreateGrant` goes to the deploying
+principal, not the Lambda roles. The **DynamoDB** action split (`PutItem` vs `GetItem`) is
+untouched — that is where least privilege actually pays here, and it remains asserted.
+
+The `ViaService` Region position is a literal `*`, not the deployment Region: AWS requires
+the permission to be Region-independent so DynamoDB can make cross-Region calls. Pinning the
+Region is a second, subtler way to break this.
+
+**Consequence for AGENT-83:** the posture test must assert the *corrected* set plus the
+`ViaService` condition. A test written against the old design would encode the defect.
+
+---
+
+## D-007 — No CloudTrail data events on the DynamoDB table
+
+**Date:** 2026-08-08 · **By:** lead (from sa-1 finding W-2) · **Status:** Accepted
+
+DynamoDB data events are off by default and are a per-table opt-in. Shorty enables neither
+them nor a trail.
+
+**Why:** data events are billed per event and would be the second recurring charge in a PoC
+whose whole cost story is one KMS key. Management events — table created, key policy
+changed — are captured by the account's default trail regardless, and those are the events
+that matter for a reference build.
+
+Recorded rather than left silent, because an absent audit trail on a data store reads as an
+oversight in review. **Revisit if:** the service ever stores real user links, at which point
+per-item read auditing becomes a compliance question rather than a cost one.
+
+---
+
+## D-008 — Open-redirect abuse is accepted, and mitigated by authenticated minting
+
+**Date:** 2026-08-08 · **By:** lead (from sa-1 finding W-5) · **Status:** Accepted
+
+Any URL shortener is an open redirector by construction: it takes an arbitrary URL and
+bounces a browser to it, which is exactly what makes shorteners useful for phishing. D-003
+addresses only the internal-address angle, not this one.
+
+**Why the residual risk is acceptable here:** minting requires a valid Cognito JWT and
+self-service signup is disabled (`self_sign_up_enabled=False`), so every link is
+attributable to an administratively-created identity recorded in `createdBy`. An anonymous
+attacker cannot mint at all. That is a stronger control than the domain-blocklist most
+public shorteners rely on.
+
+**Not doing:** blocklist/reputation checks on submitted URLs, or an interstitial warning
+page. Both need an external reputation feed and a UI — the second is explicitly out of scope
+for a backend-only build.
+
+**Revisit if:** signup is ever opened up, which converts this from a low risk to the
+service's primary abuse vector.
+
+---
+
+## D-009 — `dynamodb.Table` (v1 L2), not `TableV2`
+
+**Date:** 2026-08-08 · **By:** devops-1, during AGENT-79 · **Status:** Accepted
+
+`design.md` originally specified `dynamodb.TableV2`, the global-table L2. It cannot be used
+here.
+
+In `aws-cdk-lib` 2.263.0, `TableEncryptionV2.customer_managed_key` throws
+`ReplicaSpecificationCannotRenderedRegion` whenever the stack's Region is an unresolved
+token. It cannot render even the deployment Region's replica SSE specification in a
+Region-agnostic stack, and there is no parameter that avoids it (verified by devops-1
+against the compiled construct source).
+
+That is a direct collision with **NF1**, the spec's defining constraint: no `env=`, no
+context lookups, `cdk synth` succeeding with zero AWS credentials. NF1 wins — it is the
+constraint the entire verification strategy rests on, whereas `TableV2` was a default, not a
+requirement. Shorty is single-region and needs no global tables.
+
+`dynamodb.Table` satisfies every acceptance criterion Region-agnostically: customer-managed
+key encryption, PITR, deletion protection, `RemovalPolicy.RETAIN`.
+
+**Externally-visible consequence:** `ShortyDataStack.table` is typed `ITable`, not
+`ITableV2`, so `ShortyAppStack`'s constructor prop is typed accordingly. Recorded because a
+future reader who "upgrades" the construct to `TableV2` will break `cdk synth` for a reason
+that is not obvious from the error message.
+
+---
+
+## D-010 — Group barriers are enforced by issue links, not by spawn timing
+
+**Date:** 2026-08-08 · **By:** lead · **Status:** Accepted (process correction)
+
+A process error worth recording, because it cost real rework.
+
+I sequenced the four parallel groups by *when I spawned teammates*, assuming a teammate
+works the issue it was handed and then stops. It does not. Teammates self-claim from the
+queue, and the `TeammateIdle` hook actively pushes an idle teammate to claim the next
+unclaimed issue carrying its role label. So devops-1 finished AGENT-75 (group 1), then
+immediately claimed and completed AGENT-79 and claimed AGENT-80 — both group 2 — while I
+still believed group 2 had not started.
+
+Two concrete consequences: AGENT-79 was completed ~2 minutes before I added
+`deletion_protection` to its acceptance criteria, and AGENT-80 was claimed ~20 seconds after
+I posted the D-006 KMS correction, which came far too close to shipping the Critical defect
+that review had just caught.
+
+**The rule:** a group barrier only exists if it is expressed as a `Blocks` issue link, in
+place *before* the blocking issue can reach `In Review`. Spawn timing enforces nothing.
+Equivalently — an issue's acceptance criteria must be final before it is claimable, because
+editing a claimed or completed issue's criteria does not retroactively change the work.
