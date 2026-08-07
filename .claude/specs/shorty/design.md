@@ -123,6 +123,29 @@ stub by monkeypatching the module attribute — no moto, no network.
 `event["pathParameters"]["code"]`. Both return
 `{"statusCode": int, "headers": {...}, "body": str}`.
 
+## Data Model
+
+One item per link. **These attribute names are part of the contract**, not an
+implementation detail — `create_handler` writes them and `redirect_handler` reads them, and
+because both handlers stub `boto3` in their unit tests, **no test on either side can catch a
+mismatch between them.** A rename on one side alone produces a suite that is fully green and
+a service that returns 500 on every redirect.
+
+| Attribute | Type | Written by | Notes |
+|---|---|---|---|
+| `code` | S | create | Partition key. 7 chars, matches `codec.CODE_PATTERN` |
+| `url` | S | create | The validated destination, returned as the `Location` header |
+| `createdAt` | S | create | ISO-8601 UTC, e.g. `2026-08-08T00:31:07Z` |
+| `createdBy` | S | create | The Cognito `sub` claim of the minting caller |
+
+`redirect_handler` reads exactly `Key={"code": ...}` and `item["url"]["S"]`. It must never
+write.
+
+This section was added mid-build after coding-2 observed that the attribute names were
+agreed between two teammates by message rather than fixed by the spec — the names happened
+to match, but nothing guaranteed it. Recorded because "the tests pass" was never evidence
+either way here.
+
 ## Data Flow
 
 **Mint.** `POST /links` → authorizer validates the JWT against the pool issuer → `create_fn`

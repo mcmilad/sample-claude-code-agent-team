@@ -10,8 +10,8 @@ import secrets
 import string
 
 # 62 symbols: A-Z a-z 0-9. Non-enumerable by construction (see
-# spec.md -> Design Decisions -> Code minting): a counter or UUID prefix
-# would either leak volume or waste bits on a fixed prefix.
+# spec.md -> Design Decisions -> Code minting: rejected a monotonic counter
+# because it leaks volume and lets anyone walk the corpus).
 ALPHABET: str = string.ascii_letters + string.digits
 
 CODE_LENGTH: int = 7
@@ -28,5 +28,9 @@ def generate_code() -> str:
     Uses `secrets.choice`, never `random`: `random` is seeded
     deterministically, which would make codes guessable and defeat the whole
     reason minting is not a monotonic counter.
+
+    Not guaranteed unique -- callers that persist the result (create_handler,
+    per spec F6) are responsible for detecting a collision (e.g. a
+    conditional put) and retrying with a fresh call.
     """
     return "".join(secrets.choice(ALPHABET) for _ in range(CODE_LENGTH))
