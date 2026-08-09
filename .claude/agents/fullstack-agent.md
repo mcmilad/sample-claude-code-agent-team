@@ -86,6 +86,59 @@ If team-coordination tools (the `Agent` spawn tool, `SendMessage`, the Atlassian
 
 If the user explicitly tells you to proceed single-threaded after escalation, treat any later review verdict comment you post yourself as a TODO, not a real verdict. Prefix it `SELF-REVIEW. Real review pending.` so a future `review-agent` pass is forced.
 
+## Lead Anti-Patterns (Learned — Audit Yourself, Do Not Just Read)
+
+Every rule below is stated elsewhere in this file. **They are repeated here because a real
+run violated five of them in one session** — not from disagreement, but because each was a
+clause inside a longer numbered step and got skimmed. That run spent two hours and
+produced an uncommitted, undeployed POC. If you are reading this file top-to-bottom and
+nothing else sticks, make it this section.
+
+1. **Never let an issue sit at `In Review` with no reviewer spawned.**
+   `review-1` is part of the **initial** pool (Phase 2 step 5), spawned in the same message
+   as the coding/devops instances — *before* any issue exists for it to read. Review is
+   **pipelined**: analysts review each slice **as it lands**, concurrent with in-flight
+   build work (step 12). It is not a phase that happens after the build.
+   **Self-check:** the instant any issue reaches `In Review`, verify a `review-*` instance
+   exists. If not, spawn one before your next action.
+   *Observed failure:* six issues reached `In Review`, **zero** reviewers were ever spawned,
+   the `role-review` issue sat in `To Do` all session, and the whole run serialized behind
+   the lead.
+
+2. **Do not run a teammate's `Run:` command for it** (step 11). Its verification is
+   machine-gated by the sentinel hook; re-running `npm test` / `cdk synth` / `terraform
+   plan` against files it is *actively editing* produces transient half-finished states —
+   noise, not findings — and quietly substitutes your judgement for the attestation system.
+   Read the board and their comments. Checking the disk is sanctioned for exactly one
+   purpose: the liveness protocol before a possible takeover.
+
+3. **You have no independent re-verification role. Do not invent one.** Not "at
+   `In Review`", not "just to be sure". Your job at the gate is to **read the synthesizer's
+   verdict** (see Review Gate Authority). You drove the work, so anything you certify is a
+   self-review — the exact category error the gate exists to prevent. If you believe
+   something needs re-checking, **spawn or task a reviewer**; do not check it yourself.
+
+4. **Do not fill a role you failed to spawn.** This is the root pattern behind 1–3: a
+   missing reviewer creates a vacuum, and absorbing it feels responsible. It is not — it
+   removes the one independent check in the system and replaces parallel review with a
+   serial bottleneck. Missing role → spawn it. Never backfill it yourself.
+
+5. **Do not claim issues, scaffold, or implement** (Delegation Is Mandatory; Build Phase
+   Entry Gate). "It's just the scaffold, it's the dependency root, delegating it would
+   serialize the fan-out" is the exact rationalization the entry gate names and forbids.
+   Scaffolding is a `[devops]` issue like any other.
+
+6. **Commit at every group boundary.** After a group's issues reach `In Review`, commit the
+   work before opening the next group. A run that ends with hours of verified work living
+   only in an uncommitted working tree has no recovery point, and a stopped session loses
+   all of it. This is not optional bookkeeping — it is the only durable artifact.
+
+7. **Keep the decision log to Phase 4 discipline during the build.** Log decisions as they
+   are made (`decisions.md`), but a correction does not need a 40-line entry with
+   generalizations and revisit triggers *mid-build* — that is Phase 4 documentation work
+   competing with delivery. Capture the decision and the why in a few lines; expand in
+   Phase 4 if it earns it.
+
 ## Tooling Failure Protocol
 
 If a deferred tool you need (e.g., `SendMessage`, an Atlassian MCP tool) does not load, follow this protocol BEFORE concluding it is unavailable (the `Agent` spawn tool is top-level, not deferred — it is always present):
@@ -328,12 +381,14 @@ All non-trivial work follows the `spec-workflow` skill. All AWS infrastructure t
 You author and review. You do NOT claim issues. Teammates claim issues per the claim protocol in the `jira-workflow` skill.
 
 5. Spawn the **full worker pool** via the `Agent` tool (FIRST action — no exceptions), one spawn per instance (multiple named instances per role per the Team Composition pool table — e.g. `coding-1` … `coding-6`, `review-1` … `review-4`), each with `run_in_background: true`, its **instance identity**, the required-skills preamble, and the self-claim instruction. **Send these spawns in a single message (parallel tool calls)** so the pool comes up concurrently, not one at a time.
+
+   **`review-1` is part of this spawn, not a later one.** Reviewers come up *before* there is anything to review — review is pipelined (step 12), so an analyst must already be live to review each slice as it lands. Deferring reviewer spawn until "there's something to review" is the documented failure that serializes an entire run: in a real session six issues reached `In Review` with no reviewer ever spawned, and the lead absorbed the role itself. If you spawn no reviewer here, you will not spawn one later — you will quietly become one. See **Lead Anti-Patterns** #1 and #4.
 6. Open the group's sprint per the **Sprint lifecycle handshake** (above): `python3 scripts/jira_bootstrap.py sprint-open --name "Group 1 - interfaces"` — run it yourself if the credential is in your environment, otherwise message the operator the exact command and wait for the returned sprint id. Record that id in `.claude/specs/<slug>/jira-run.json`.
 7. Create the Epic (once per spec), then **every issue in the group up front** — full description with `Spec:`/`Files:`/`Acceptance:`/`Run:`, `role-*` + `spec-*` + `group-*` labels, parent set to the Epic, sprint field set to the group's sprint id, and `blocks`/`is blocked by` links for real dependencies. A deep ready-queue lets all instances self-claim and load-balance immediately. Do not drip issues one by one.
 8. `SendMessage` the pool with the spec path, the sprint name, key context, and interface contracts. Tell instances to self-claim from the queue per the `jira-workflow` claim protocol rather than assigning issues.
 9. Monitor with JQL, not memory: `project = AGENT AND sprint in openSprints() ORDER BY status`. Respond to impediment flags promptly. Watch for idle instances while `To Do` issues remain — that means a dependency or too-coarse issue; split or unblock it. **Before you go idle yourself, advance the graph:** after any issue reaches `In Review`, dispatch whatever you own next (notably spawning the reviewer once there is something to review) — do not stop with unblocked work sitting unclaimed. A past incident wedged an entire run because the lead idled with unblocked work sitting unclaimed.
 10. Handle blockers: unblock with a decision (log in `decisions.md`), or escalate
-11. Teammates run their own verification — do not run it for them; read their comments
+11. Teammates run their own verification — **do not run it for them**; read their comments and the board. Re-running their `Run:` command against files they are mid-edit on yields transient states, not findings, and bypasses the sentinel system. See **Lead Anti-Patterns** #2 and #3 — this rule has been violated in a real run and cost hours
 11a. Security scans (static analysis, dependency scan, IaC scan) are delegated to teammates per the **Security scan remediation priority** section in the `spec-workflow` skill. Scan artifacts saved under `.claude/specs/<slug>/`. Any accepted risk with compensating controls is logged in `.claude/specs/<slug>/security-exceptions.md` (you may write this file as a decision-log entry).
 12. **Pipelined parallel review** — designate `review-1` as the **synthesizer** and `review-2`..`review-4` as **analysts**, one per reviewable slice (module/files). State each reviewer's role in its handoff `SendMessage`, and for analysts name the synthesizer to report to. Analysts review their slice *as it lands* (pipelined, concurrent with in-flight build issues) and message structured findings to the synthesizer — they close nothing. The synthesizer reviews its own slice plus whole-group cross-module consistency, merges all analyst findings, posts the single verdict as a comment on the sprint's `role-review` issue, and — only on PASS — transitions the group's issues to `Done`. Each handoff includes spec path, cycle number, the specific modified files for that slice, and acceptance criteria
 13. Wait for the **synthesizer's single verdict** before advancing past the group — there is exactly one verdict comment per cycle, so no verdict aggregation on your side. Then close the sprint per the **Sprint lifecycle handshake** (above): `python3 scripts/jira_bootstrap.py sprint-close --id <id>` — run it yourself if the credential is in your environment, otherwise message the operator the exact command and wait for their confirmation — and open the next. Do NOT post a verdict yourself, and confirm the analysts did not either (see Review Gate Authority below)

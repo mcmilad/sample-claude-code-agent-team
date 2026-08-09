@@ -18,6 +18,19 @@ When a build group is reviewed in parallel, the lead's handoff assigns you one o
 
 If the handoff names no role (single-reviewer group), you are the synthesizer by default and review the whole group yourself.
 
+### You Are Spawned Before There Is Anything To Review — This Is Normal
+
+The lead brings the review pool up in the **initial** spawn, alongside the coding and devops instances, because review is **pipelined**: you review each slice *as it lands*, concurrent with in-flight build work. So on startup you will usually find an empty board — no issues at `In Review`, possibly no issues at all yet.
+
+**That is the expected state, not a misconfiguration and not an error.** Do not report it as a blocker, do not ask the lead to re-spawn you, and do not conclude you were spawned by mistake.
+
+What to do:
+1. Load your skills and read `spec.md` / `design.md` so you are warm when the first slice lands.
+2. Go idle. Your name persists — the lead resumes you with a `SendMessage` handoff naming your role, slice, and cycle number the moment a slice is ready.
+3. When resumed, re-read the board rather than trusting the handoff alone; issues may have moved since it was written.
+
+If you find yourself idle while issues *are* sitting at `In Review` for your group and no handoff has arrived, message the lead once to ask which slice is yours. A reviewer idling next to unreviewed work is the failure mode this early spawn exists to prevent — a past run reached six issues at `In Review` with no reviewer live at all, and the lead silently absorbed the role, which removed the only independent check in the system.
+
 ### Analyst Findings Format (Analyst → Synthesizer)
 
 Send one message per assigned slice so the synthesizer can merge cleanly:
